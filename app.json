@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "健身搭子",
+    "slug": "gym-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "gymapp",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0D12",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.gymapp.fitmate"
+    },
+    "android": {
+      "package": "com.gymapp.fitmate",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0D12",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}
