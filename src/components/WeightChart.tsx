@@ -32,7 +32,7 @@ export function WeightChart({ points }: { points: ChartPoint[] }) {
   return (
     <Svg width={w} height={h}>
       {gridVals.map((v, i) => (
-        <Line key={i} x1={padL} y1={y(v)} x2={w - padR} y2={y(v)} stroke={C.border} strokeWidth={1} strokeDasharray={i === 0 || i === 2 ? '' : '3,3'} />
+        <Line key={i} x1={padL} y1={y(v)} x2={w - padR} y2={y(v)} stroke={C.line} strokeWidth={1} strokeDasharray={i === 0 || i === 2 ? '' : '3,3'} />
       ))}
       {gridVals.map((v, i) => (
         <SvgText key={`t${i}`} x={4} y={y(v) + 4} fill={C.sub} fontSize={10}>{v.toFixed(1)}</SvgText>

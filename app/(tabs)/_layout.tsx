@@ -1,6 +1,14 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Tabs } from 'expo-router';
-import { C } from '../../src/theme';
+import { C, FONT } from '../../src/theme';
+
+const TABS = [
+  { route: 'index', title: '今日', icon: 'today' },
+  { route: 'plans', title: '计划', icon: 'barbell' },
+  { route: 'diet', title: '饮食', icon: 'nutrition' },
+  { route: 'journal', title: '手帐', icon: 'book' },
+  { route: 'profile', title: '我的', icon: 'person' },
+];
 
 export default function TabsLayout() {
   return (
@@ -11,50 +19,28 @@ export default function TabsLayout() {
         tabBarInactiveTintColor: C.sub,
         tabBarStyle: {
           backgroundColor: C.card,
-          borderTopColor: C.border,
-          height: 60,
+          borderTopColor: C.inkAlphaSoft,
+          borderTopWidth: 1.5,
+          height: 62,
           paddingBottom: 6,
           paddingTop: 4,
         },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+        tabBarLabelStyle: { fontSize: 10, fontWeight: '700', fontFamily: FONT.semi },
         sceneStyle: { backgroundColor: C.bg },
       }}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: '今日',
-          tabBarIcon: ({ color, size }) => <Ionicons name="today-outline" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="plans"
-        options={{
-          title: '计划',
-          tabBarIcon: ({ color, size }) => <Ionicons name="barbell-outline" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="diet"
-        options={{
-          title: '饮食',
-          tabBarIcon: ({ color, size }) => <Ionicons name="nutrition-outline" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="history"
-        options={{
-          title: '日历',
-          tabBarIcon: ({ color, size }) => <Ionicons name="calendar-outline" size={size} color={color} />,
-        }}
-      />
-      <Tabs.Screen
-        name="profile"
-        options={{
-          title: '我的',
-          tabBarIcon: ({ color, size }) => <Ionicons name="person-outline" size={size} color={color} />,
-        }}
-      />
+      {TABS.map((t) => (
+        <Tabs.Screen
+          key={t.route}
+          name={t.route}
+          options={{
+            title: t.title,
+            tabBarIcon: ({ color, size, focused }) => (
+              <Ionicons name={(focused ? t.icon : `${t.icon}-outline`) as keyof typeof Ionicons.glyphMap} size={size - 2} color={color} />
+            ),
+          }}
+        />
+      ))}
     </Tabs>
   );
 }

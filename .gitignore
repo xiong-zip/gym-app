@@ -40,3 +40,9 @@ yarn-error.*
 /ios
 /android
 .claude/
+
+# UI makeover screenshots
+.makeover/
+
+# 打包产物（本地构建的 APK）
+*.apk

@@ -47,3 +47,25 @@ export function lastPerformanceOf(logs: WorkoutLog[], exerciseId: number): { wei
   }
   return null;
 }
+
+/**
+ * 取某动作上次成绩：动作库动作按 ID 匹配；
+ * 自定义动作（ID <= 0）没有库 ID，退化为按动作名匹配。
+ */
+export function lastPerformanceFor(
+  logs: WorkoutLog[],
+  exerciseId: number,
+  name?: string,
+): { weight: number; reps: number; date: string } | null {
+  if (exerciseId > 0) return lastPerformanceOf(logs, exerciseId);
+  const key = (name ?? '').trim();
+  if (!key) return null;
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const e = logs[i].exercises.find((x) => x.name === key);
+    if (e && e.sets.length > 0) {
+      const s = e.sets[e.sets.length - 1];
+      return { weight: s.weight, reps: s.reps, date: logs[i].date };
+    }
+  }
+  return null;
+}

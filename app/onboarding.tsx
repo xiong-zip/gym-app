@@ -1,12 +1,12 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Button, Card, Chip, Field, NumberInput, Segmented, Sub } from '../src/components/ui';
+import { Button, Card, Chip, Field, NumberInput, Press, Segmented, Sub } from '../src/components/ui';
 import { ACTIVITY_ZH, calcNutrition } from '../src/lib/nutrition';
 import { EQUIP_ACCESS_TEXT } from '../src/lib/planner';
 import { useProfileStore } from '../src/store/profile';
-import { C } from '../src/theme';
+import { C, FONT, R } from '../src/theme';
 import type { ActivityLevel, EquipmentAccess, Experience, Gender, Goal, Profile } from '../src/types';
 
 const STEPS = ['基本信息', '身体数据', '训练目标', '训练经验', '训练安排', '器械条件'];
@@ -112,12 +112,12 @@ export default function Onboarding() {
           <>
             <Field label="性别">
               <View style={s.row2}>
-                <Pressable style={[s.bigOpt, gender === 'male' && s.bigOptOn]} onPress={() => setGender('male')}>
+                <Press style={[s.bigOpt, gender === 'male' && s.bigOptOn]} onPress={() => setGender('male')} haptic="medium">
                   <Text style={[s.bigOptT, gender === 'male' && s.bigOptTOn]}>男</Text>
-                </Pressable>
-                <Pressable style={[s.bigOpt, gender === 'female' && s.bigOptOn]} onPress={() => setGender('female')}>
+                </Press>
+                <Press style={[s.bigOpt, gender === 'female' && s.bigOptOn]} onPress={() => setGender('female')} haptic="medium">
                   <Text style={[s.bigOptT, gender === 'female' && s.bigOptTOn]}>女</Text>
-                </Pressable>
+                </Press>
               </View>
             </Field>
             <Field label="年龄">
@@ -135,19 +135,20 @@ export default function Onboarding() {
             <Field label="体重">
               <NumberInput value={weightKg} onChange={setWeightKg} suffix="kg" placeholder="70" />
             </Field>
-            <Sub>体重之后可以在「减脂」页随时更新，用于追踪变化。</Sub>
+            <Sub>体重之后可以在「手帐」页随时更新，用于追踪变化。</Sub>
           </>
         )}
 
         {step === 2 && (
           <View style={s.col}>
             {GOALS.map((g) => (
-              <Pressable key={g.value} style={[s.listOpt, goal === g.value && s.listOptOn]} onPress={() => setGoal(g.value)}>
+              <Press key={g.value} style={[s.listOpt, goal === g.value && s.listOptOn]} onPress={() => setGoal(g.value)} haptic="medium">
                 <View>
                   <Text style={[s.listOptT, goal === g.value && s.listOptTOn]}>{g.label}</Text>
                   <Sub>{g.sub}</Sub>
                 </View>
-              </Pressable>
+                {goal === g.value ? <Text style={s.pickMark}>✎</Text> : null}
+              </Press>
             ))}
           </View>
         )}
@@ -155,12 +156,13 @@ export default function Onboarding() {
         {step === 3 && (
           <View style={s.col}>
             {EXP.map((e) => (
-              <Pressable key={e.value} style={[s.listOpt, experience === e.value && s.listOptOn]} onPress={() => setExperience(e.value)}>
+              <Press key={e.value} style={[s.listOpt, experience === e.value && s.listOptOn]} onPress={() => setExperience(e.value)} haptic="medium">
                 <View>
                   <Text style={[s.listOptT, experience === e.value && s.listOptTOn]}>{e.label}</Text>
                   <Sub>{e.sub}</Sub>
                 </View>
-              </Pressable>
+                {experience === e.value ? <Text style={s.pickMark}>✎</Text> : null}
+              </Press>
             ))}
             <Sub>经验等级影响推荐动作的难度与组次数安排。</Sub>
           </View>
@@ -191,17 +193,20 @@ export default function Onboarding() {
             <Field label="训练条件">
               <View style={s.col}>
                 {EQUIPS.map((e) => (
-                  <Pressable key={e.value} style={[s.listOpt, equipment === e.value && s.listOptOn]} onPress={() => setEquipment(e.value)}>
+                  <Press key={e.value} style={[s.listOpt, equipment === e.value && s.listOptOn]} onPress={() => setEquipment(e.value)} haptic="medium">
                     <View>
                       <Text style={[s.listOptT, equipment === e.value && s.listOptTOn]}>{e.label}</Text>
                       <Sub>{EQUIP_ACCESS_TEXT[e.value]}</Sub>
                     </View>
-                  </Pressable>
+                    {equipment === e.value ? <Text style={s.pickMark}>✎</Text> : null}
+                  </Press>
                 ))}
               </View>
             </Field>
             <Card style={s.preview}>
-              <Text style={s.previewT}>你的每日目标</Text>
+              <View style={s.previewMark}>
+                <Text style={s.previewT}>你的每日目标</Text>
+              </View>
               <View style={s.previewRow}>
                 <Text style={s.previewV}>{nut.kcal} kcal</Text>
                 <Sub>{`蛋白 ${nut.protein}g · 碳水 ${nut.carbs}g · 脂肪 ${nut.fat}g`}</Sub>
@@ -231,37 +236,42 @@ export default function Onboarding() {
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   head: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 8 },
-  title: { color: C.text, fontSize: 24, fontWeight: '800', marginBottom: 4 },
-  progressTrack: { height: 5, backgroundColor: C.card2, borderRadius: 99, marginTop: 14, overflow: 'hidden' },
-  progressFill: { height: 5, backgroundColor: C.accent, borderRadius: 99 },
+  title: { color: C.text, fontSize: 24, fontWeight: '800', marginBottom: 4, letterSpacing: 0.5 },
+  progressTrack: { height: 8, backgroundColor: C.inset, borderRadius: 99, marginTop: 14, overflow: 'hidden', borderWidth: 1.5, borderColor: C.inkAlphaSoft },
+  progressFill: { height: 8, backgroundColor: C.accent, borderRadius: 99 },
   body: { padding: 20, paddingTop: 24 },
   nav: {
     flexDirection: 'row',
     gap: 12,
     padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: C.border,
+    borderTopWidth: 1.5,
+    borderTopColor: C.inkAlphaSoft,
     backgroundColor: C.card,
   },
   row2: { flexDirection: 'row', gap: 12 },
   bigOpt: {
-    flex: 1, height: 56, borderRadius: 14, borderWidth: 1, borderColor: C.border,
-    backgroundColor: C.card2, alignItems: 'center', justifyContent: 'center',
+    flex: 1, height: 56, borderRadius: R.md, borderWidth: 1.5, borderColor: C.inkAlpha,
+    backgroundColor: C.card, alignItems: 'center', justifyContent: 'center',
   },
-  bigOptOn: { backgroundColor: C.accent, borderColor: C.accent },
+  bigOptOn: { backgroundColor: C.marker, borderColor: 'rgba(107,90,16,0.4)' },
   bigOptT: { color: C.text, fontSize: 17, fontWeight: '700' },
-  bigOptTOn: { color: C.onAccent },
+  bigOptTOn: { color: C.markerInk },
   col: { gap: 10 },
   listOpt: {
-    borderRadius: 14, borderWidth: 1, borderColor: C.border, backgroundColor: C.card2,
-    paddingHorizontal: 16, paddingVertical: 13,
+    borderRadius: R.md, borderWidth: 1.5, borderColor: C.inkAlpha, backgroundColor: C.card,
+    paddingHorizontal: 16, paddingVertical: 13, flexDirection: 'row', alignItems: 'center',
   },
-  listOptOn: { borderColor: C.accent, backgroundColor: '#1E2A10' },
+  listOptOn: { borderColor: C.accent, backgroundColor: '#FBEDE6' },
   listOptT: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 2 },
   listOptTOn: { color: C.accent },
+  pickMark: { color: C.accent, fontSize: 18, fontWeight: '900', marginLeft: 'auto' },
   wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   preview: { marginTop: 8 },
-  previewT: { color: C.accent, fontSize: 13, fontWeight: '700', marginBottom: 8 },
+  previewMark: {
+    alignSelf: 'flex-start', backgroundColor: C.marker, borderRadius: 5, paddingHorizontal: 8, paddingVertical: 2,
+    marginBottom: 10, transform: [{ rotate: '-0.6deg' }],
+  },
+  previewT: { color: C.markerInk, fontSize: 13, fontWeight: '700' },
   previewRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 },
-  previewV: { color: C.text, fontSize: 26, fontWeight: '800' },
+  previewV: { color: C.text, fontSize: 26, fontWeight: '800', fontFamily: FONT.extra },
 });

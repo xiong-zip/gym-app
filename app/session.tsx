@@ -2,11 +2,11 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Card, Sub } from '../src/components/ui';
+import { Animated, Card, FadeInDown, Press, Sub, haptic, stagger } from '../src/components/ui';
 import { EQUIP_ZH, EXERCISE_BY_ID } from '../src/data/exercises';
 import { fmtDur, todayKey } from '../src/lib/date';
-import { lastPerformanceOf, useWorkoutsStore } from '../src/store/workouts';
-import { C } from '../src/theme';
+import { lastPerformanceFor, useWorkoutsStore } from '../src/store/workouts';
+import { C, FONT, R, SH } from '../src/theme';
 import type { GeneratedPlan, WorkoutLog } from '../src/types';
 
 interface SetRow { weight: string; reps: string; done: boolean }
@@ -44,7 +44,7 @@ export default function SessionScreen() {
   const [sets, setSets] = useState<SetRow[][]>(() => {
     if (!plan) return [];
     return plan.exercises.map((ex) => {
-      const last = lastPerformanceOf(logs, ex.exerciseId);
+      const last = lastPerformanceFor(logs, ex.exerciseId, ex.name);
       const w = last && last.weight > 0 ? String(last.weight) : '';
       return Array.from({ length: ex.sets }, () => ({ weight: w, reps: defaultReps(ex.reps), done: false }));
     });
@@ -60,7 +60,10 @@ export default function SessionScreen() {
     const t = setInterval(() => {
       setRest((r) => {
         if (!r) return null;
-        if (r.remain <= 1) return null;
+        if (r.remain <= 1) {
+          haptic('success');
+          return null;
+        }
         return { ...r, remain: r.remain - 1 };
       });
     }, 1000);
@@ -72,9 +75,9 @@ export default function SessionScreen() {
       <SafeAreaView style={s.safe} edges={['top']}>
         <View style={s.center}>
           <Sub>计划数据无效</Sub>
-          <Pressable style={s.backChip} onPress={() => router.back()}>
+          <Press style={s.backChip} onPress={() => router.back()}>
             <Text style={s.backChipT}>返回</Text>
-          </Pressable>
+          </Press>
         </View>
       </SafeAreaView>
     );
@@ -88,6 +91,7 @@ export default function SessionScreen() {
 
   const toggleSet = (ei: number, si: number) => {
     const willDone = !sets[ei][si].done;
+    haptic(willDone ? 'medium' : 'light');
     setSets((prev) => prev.map((ex, i) => {
       if (i !== ei) return ex;
       return ex.map((r, j) => (j !== si ? r : { ...r, done: willDone }));
@@ -135,11 +139,8 @@ export default function SessionScreen() {
       exercises: entries,
     };
     addLog(log);
-    Alert.alert(
-      '训练完成 💪',
-      `${totalDone} 组 · 总容量 ${Math.round(volume)} kg · 用时 ${fmtDur(log.durationSec)}\n下次同动作会自动参考本次重量。`,
-      [{ text: '好的', onPress: () => router.back() }],
-    );
+    haptic('success');
+    router.replace({ pathname: '/summary', params: { id: log.id } });
   };
 
   const quit = () => {
@@ -163,88 +164,90 @@ export default function SessionScreen() {
           <Text style={s.headT} numberOfLines={1}>{plan.title}</Text>
           <Sub>{`${totalDone} 组 · ${Math.round(volume)} kg · ${fmtDur(elapsed)}`}</Sub>
         </View>
-        <Pressable style={s.finishBtn} onPress={finish}>
+        <Press style={s.finishBtn} onPress={finish}>
           <Text style={s.finishT}>完成</Text>
-        </Pressable>
+        </Press>
       </View>
 
-      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: rest ? 130 : 40, gap: 12 }}>
+      <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: rest ? 140 : 40, gap: 14 }}>
         {plan.exercises.map((ex, ei) => {
           const meta = EXERCISE_BY_ID.get(ex.exerciseId);
-          const last = lastPerformanceOf(logs, ex.exerciseId);
+          const last = lastPerformanceFor(logs, ex.exerciseId, ex.name);
           const allDone = sets[ei].every((r) => r.done);
           return (
-            <Card key={`${ex.exerciseId}-${ei}`} style={allDone ? { borderColor: C.accent, backgroundColor: '#15200C' } : undefined}>
-              <View style={s.exHead}>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.exT}>{ex.name}</Text>
-                  <Sub>
-                    {`${ex.sets}组 × ${ex.reps} · 休息${ex.restSec}s${meta ? ` · ${EQUIP_ZH[meta.equipment]}` : ''}`}
-                    {last ? ` · 上次 ${last.weight}kg×${last.reps}` : ''}
-                  </Sub>
+            <Animated.View key={`${ex.exerciseId}-${ei}`} entering={stagger(ei)}>
+              <Card style={[allDone && { backgroundColor: '#FBF3D5', borderColor: 'rgba(107,90,16,0.28)' }]}>
+                <View style={s.exHead}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.exT}>{ex.name}</Text>
+                    <Sub>
+                      {`${ex.sets}组 × ${ex.reps} · 休息${ex.restSec}s${meta ? ` · ${EQUIP_ZH[meta.equipment]}` : ''}`}
+                      {last ? ` · 上次 ${last.weight}kg×${last.reps}` : ''}
+                    </Sub>
+                  </View>
+                  {allDone ? <Text style={s.checkBig}>✓</Text> : null}
                 </View>
-                {allDone ? <Text style={s.checkBig}>✓</Text> : null}
-              </View>
 
-              {ex.note ? <Sub style={{ marginTop: 4, marginBottom: 6 }}>{ex.note}</Sub> : null}
+                {ex.note ? <Sub style={{ marginTop: 4, marginBottom: 6 }}>{ex.note}</Sub> : null}
 
-              <View style={s.setHeader}>
-                <Text style={s.setColT}>组</Text>
-                <Text style={s.setColT}>{ex.timed ? '秒数' : '重量 kg'}</Text>
-                <Text style={s.setColT}>{ex.timed ? '—' : '次数'}</Text>
-                <Text style={s.setColT}>完成</Text>
-              </View>
-              {sets[ei].map((row, si) => (
-                <View key={si} style={s.setRow}>
-                  <Text style={s.setIdx}>{si + 1}</Text>
-                  {ex.timed ? (
-                    <View style={s.readonlyVal}><Text style={s.readonlyT}>{row.reps}</Text></View>
-                  ) : (
+                <View style={s.setHeader}>
+                  <Text style={s.setColT}>组</Text>
+                  <Text style={s.setColT}>{ex.timed ? '秒数' : '重量 kg'}</Text>
+                  <Text style={s.setColT}>{ex.timed ? '—' : '次数'}</Text>
+                  <Text style={s.setColT}>完成</Text>
+                </View>
+                {sets[ei].map((row, si) => (
+                  <View key={si} style={[s.setRow, row.done && s.setRowDone]}>
+                    <Text style={s.setIdx}>{si + 1}</Text>
+                    {ex.timed ? (
+                      <View style={s.readonlyVal}><Text style={s.readonlyT}>{row.reps}</Text></View>
+                    ) : (
+                      <TextInput
+                        style={[s.setInput, row.done && s.setInputDone]}
+                        value={row.weight}
+                        onChangeText={(v) => editSet(ei, si, 'weight', v)}
+                        keyboardType="decimal-pad"
+                        placeholder="0"
+                        placeholderTextColor={C.faint}
+                      />
+                    )}
                     <TextInput
-                      style={s.setInput}
-                      value={row.weight}
-                      onChangeText={(v) => editSet(ei, si, 'weight', v)}
-                      keyboardType="decimal-pad"
+                      style={[s.setInput, row.done && s.setInputDone]}
+                      value={row.reps}
+                      onChangeText={(v) => editSet(ei, si, 'reps', v)}
+                      keyboardType="number-pad"
                       placeholder="0"
-                      placeholderTextColor={C.sub}
+                      placeholderTextColor={C.faint}
                     />
-                  )}
-                  <TextInput
-                    style={s.setInput}
-                    value={row.reps}
-                    onChangeText={(v) => editSet(ei, si, 'reps', v)}
-                    keyboardType="number-pad"
-                    placeholder="0"
-                    placeholderTextColor={C.sub}
-                  />
-                  <Pressable hitSlop={6} onPress={() => toggleSet(ei, si)} style={[s.doneBtn, row.done && s.doneBtnOn]}>
-                    <Text style={[s.doneT, row.done && s.doneTOn]}>{row.done ? '✓' : ''}</Text>
-                  </Pressable>
-                </View>
-              ))}
-              <Pressable style={s.addSet} onPress={() => addSet(ei)}>
-                <Text style={s.addSetT}>＋ 加一组</Text>
-              </Pressable>
-            </Card>
+                    <Pressable hitSlop={6} onPress={() => toggleSet(ei, si)} style={[s.doneBtn, row.done && s.doneBtnOn]}>
+                      <Text style={[s.doneT, row.done && s.doneTOn]}>{row.done ? '✓' : ''}</Text>
+                    </Pressable>
+                  </View>
+                ))}
+                <Press style={s.addSet} onPress={() => addSet(ei)}>
+                  <Text style={s.addSetT}>＋ 加一组</Text>
+                </Press>
+              </Card>
+            </Animated.View>
           );
         })}
       </ScrollView>
 
       {rest && (
-        <View style={s.restBar}>
+        <Animated.View entering={FadeInDown.duration(260)} style={s.restBar}>
           <View style={{ flex: 1 }}>
-            <Text style={s.restT}>组间休息 {rest.remain}s</Text>
+            <Text style={s.restT}>{`组间休息 ${rest.remain}s`}</Text>
             <View style={s.restTrack}>
               <View style={[s.restFill, { width: `${(1 - rest.remain / rest.total) * 100}%` }]} />
             </View>
           </View>
-          <Pressable style={s.restBtn} onPress={() => setRest((r) => (r ? { ...r, remain: r.remain + 30, total: r.total + 30 } : r))}>
+          <Press style={s.restBtn} onPress={() => setRest((r) => (r ? { ...r, remain: r.remain + 30, total: r.total + 30 } : r))}>
             <Text style={s.restBtnT}>+30s</Text>
-          </Pressable>
-          <Pressable style={[s.restBtn, { borderColor: C.border }]} onPress={() => setRest(null)}>
+          </Press>
+          <Press style={[s.restBtn, s.restBtnSkip]} onPress={() => setRest(null)}>
             <Text style={[s.restBtnT, { color: C.sub }]}>跳过</Text>
-          </Pressable>
-        </View>
+          </Press>
+        </Animated.View>
       )}
     </SafeAreaView>
   );
@@ -253,48 +256,54 @@ export default function SessionScreen() {
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14 },
-  backChip: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 20, paddingVertical: 10 },
+  backChip: { backgroundColor: C.accent, borderRadius: R.md, paddingHorizontal: 20, paddingVertical: 10 },
   backChipT: { color: C.onAccent, fontWeight: '800' },
   head: {
     flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.card, gap: 12,
+    borderBottomWidth: 1.5, borderBottomColor: C.inkAlphaSoft, backgroundColor: C.card, gap: 12,
   },
-  closeT: { color: C.sub, fontSize: 20 },
+  closeT: { color: C.sub, fontSize: 20, fontWeight: '700' },
   headT: { color: C.text, fontSize: 16, fontWeight: '800', marginBottom: 2 },
-  finishBtn: { backgroundColor: C.accent, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 9 },
+  finishBtn: {
+    backgroundColor: C.accent, borderRadius: R.sm, paddingHorizontal: 16, paddingVertical: 9,
+    borderWidth: 1.5, borderColor: C.accentDeep, ...SH.sm,
+  },
   finishT: { color: C.onAccent, fontWeight: '800', fontSize: 14 },
   exHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
   exT: { color: C.text, fontSize: 17, fontWeight: '800', marginBottom: 3 },
-  checkBig: { color: C.accent, fontSize: 22, fontWeight: '900' },
+  checkBig: { color: C.good, fontSize: 24, fontWeight: '900' },
   setHeader: { flexDirection: 'row', alignItems: 'center', marginTop: 12, marginBottom: 4 },
-  setColT: { color: C.sub, fontSize: 11, flex: 1, textAlign: 'center' },
+  setColT: { color: C.faint, fontSize: 11, flex: 1, textAlign: 'center', fontWeight: '600' },
   setRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, gap: 6 },
-  setIdx: { flex: 1, color: C.sub, fontSize: 13, fontWeight: '700', textAlign: 'center' },
+  setRowDone: { opacity: 0.75 },
+  setIdx: { flex: 1, color: C.sub, fontSize: 13, fontWeight: '700', textAlign: 'center', fontFamily: FONT.semi },
   setInput: {
-    flex: 1, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 10,
+    flex: 1, backgroundColor: C.inset, borderWidth: 1.5, borderColor: C.inkAlpha, borderRadius: R.sm,
     height: 40, color: C.text, textAlign: 'center', fontSize: 15, fontWeight: '700', paddingVertical: 0,
   },
+  setInputDone: { backgroundColor: '#EDDFB2', borderColor: 'rgba(107,90,16,0.3)' },
   readonlyVal: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   readonlyT: { color: C.sub, fontSize: 14 },
   doneBtn: {
-    flex: 1, height: 36, borderRadius: 10, borderWidth: 1.5, borderColor: C.border,
+    flex: 1, height: 36, borderRadius: 999, borderWidth: 2, borderColor: C.line,
     alignItems: 'center', justifyContent: 'center', marginHorizontal: 6,
   },
-  doneBtnOn: { backgroundColor: C.accent, borderColor: C.accent },
+  doneBtnOn: { backgroundColor: C.good, borderColor: C.good },
   doneT: { color: 'transparent', fontSize: 16, fontWeight: '900' },
-  doneTOn: { color: C.onAccent },
-  addSet: { marginTop: 8, alignItems: 'center', paddingVertical: 7, borderRadius: 10, backgroundColor: C.card2 },
+  doneTOn: { color: '#FFFDF6' },
+  addSet: { marginTop: 8, alignItems: 'center', paddingVertical: 8, borderRadius: R.sm, backgroundColor: C.inset, borderWidth: 1.5, borderColor: C.inkAlphaSoft, borderStyle: 'dashed' },
   addSetT: { color: C.accent, fontSize: 13, fontWeight: '700' },
   restBar: {
     position: 'absolute', left: 12, right: 12, bottom: 16,
-    backgroundColor: C.card, borderWidth: 1, borderColor: C.accent, borderRadius: 16,
-    flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14,
+    backgroundColor: C.card, borderWidth: 1.5, borderColor: C.accent, borderRadius: R.lg,
+    flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, ...SH.lg,
   },
   restT: { color: C.accent, fontSize: 15, fontWeight: '800', marginBottom: 7 },
-  restTrack: { height: 5, backgroundColor: C.card2, borderRadius: 99, overflow: 'hidden' },
-  restFill: { height: 5, backgroundColor: C.accent, borderRadius: 99 },
+  restTrack: { height: 6, backgroundColor: C.inset, borderRadius: 99, overflow: 'hidden', borderWidth: 1, borderColor: C.inkAlphaSoft },
+  restFill: { height: 6, backgroundColor: C.accent, borderRadius: 99 },
   restBtn: {
-    borderWidth: 1, borderColor: C.accent, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8,
+    borderWidth: 1.5, borderColor: C.accent, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8,
   },
+  restBtnSkip: { borderColor: C.inkAlpha },
   restBtnT: { color: C.accent, fontSize: 12, fontWeight: '700' },
 });

@@ -59,7 +59,7 @@ export interface GeneratedPlan {
   sessionType: SessionType;
   focus: MuscleGroup[];
   durationMin: number;
-  source: 'rule' | 'ai';
+  source: 'rule' | 'ai' | 'custom';
   tips: string;
   exercises: PlannedExercise[];
   createdAt: number;
@@ -114,4 +114,39 @@ export interface AISettings {
   baseUrl: string;
   apiKey: string;
   model: string;
+}
+
+/* ---------- 手帐 plog ---------- */
+
+export type JournalKind = 'workout' | 'meal' | 'free';
+
+export interface JournalSticker {
+  id: string;
+  uri: string;        // data URI（base64）或本地文件 URI
+  x: number;          // 画布归一化坐标 0..1
+  y: number;
+  rot: number;        // 角度
+  scale: number;
+  cutout?: boolean;   // 端上抠图贴纸（自带白描边，不套相纸框）
+  iw?: number;        // 贴纸原始宽高（保持比例）
+  ih?: number;
+}
+
+export interface DoodlePath {
+  id: string;
+  color: string;
+  width: number;
+  points: number[][]; // 归一化坐标点 [x, y]，0..1
+}
+
+export interface JournalEntry {
+  id: string;
+  date: string;       // YYYY-MM-DD
+  kind: JournalKind;
+  title: string;
+  note: string;
+  stickers: JournalSticker[];
+  doodles: DoodlePath[];
+  statsText?: string; // 自动盖章的数据（训练容量 / 餐次）
+  createdAt: number;
 }
