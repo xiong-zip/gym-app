@@ -27,24 +27,26 @@ export function JournalMini({
         </View>
       ) : null}
       {entry.stickers.map((st) => (
+        // 与编辑端同构：原始宽 30% + transform 缩放（中心锚点），
+        // 两端画布宽度不同也能严格对齐
         <View
           key={st.id}
           style={{
-            position: 'absolute', left: `${st.x * 100}%`, top: `${st.y * 100}%`,
-            transform: [{ rotate: `${st.rot}deg` }],
+            position: 'absolute', left: `${st.x * 100}%`, top: `${st.y * 100}%`, width: '30%',
+            transform: [{ rotate: `${st.rot}deg` }, { scale: clampScale(st.scale) }],
           }}
         >
           {st.cutout ? (
             <Image
               source={{ uri: st.uri }}
-              style={{ width: `${40 * clampScale(st.scale)}%`, aspectRatio: st.iw && st.ih ? st.iw / st.ih : 1 }}
+              style={{ width: '100%', aspectRatio: st.iw && st.ih ? st.iw / st.ih : 1 }}
               resizeMode="contain"
             />
           ) : (
             <View style={s.sticker}>
               <Image
                 source={{ uri: st.uri }}
-                style={{ width: `${34 * clampScale(st.scale)}%`, aspectRatio: 5 / 6, borderRadius: 2 }}
+                style={{ width: '100%', aspectRatio: 5 / 6, borderRadius: 4 }}
                 resizeMode="cover"
               />
               <View style={s.tape} />
@@ -101,12 +103,13 @@ const s = StyleSheet.create({
     overflow: 'hidden',
   },
   sticker: {
-    backgroundColor: '#FFFFFF', padding: 4, paddingBottom: 7, borderRadius: 2,
-    borderWidth: 1, borderColor: C.inkAlphaSoft, ...SH.sm,
+    // 贴纸式白描边（不是相框）：粗白边 + 硬偏移阴影 + 小胶带
+    backgroundColor: '#FFFDF6', borderWidth: 3, borderColor: '#FFFDF6',
+    borderRadius: 8, ...SH.md,
   },
   tape: {
-    position: 'absolute', top: -6, alignSelf: 'center', width: 30, height: 12,
-    backgroundColor: '#F2C94C', opacity: 0.8, borderRadius: 2, transform: [{ rotate: '-4deg' }],
+    position: 'absolute', top: -7, alignSelf: 'center', width: 32, height: 13,
+    backgroundColor: '#F2C94C', opacity: 0.85, borderRadius: 2, transform: [{ rotate: '-4deg' }],
   },
   noteWrap: { position: 'absolute', bottom: 8, left: 10, right: 10 },
   noteT: { color: C.text, fontSize: 13, fontWeight: '600', fontFamily: FONT.semi },

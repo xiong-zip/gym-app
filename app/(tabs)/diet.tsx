@@ -1,15 +1,15 @@
 import { useMemo, useState } from 'react';
-import { Alert, FlatList, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, FlatList, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Animated, Bar, Button, Card, Chip, Press, Ring, SectionTitle, Sticker, Sub, Tape, stagger } from '../../src/components/ui';
+import { Animated, Bar, Button, Card, Chip, Press, Ring, Scroll, SectionTitle, Sticker, Sub, Tape, stagger } from '../../src/components/ui';
 import { FOOD_CATS, FOODS } from '../../src/data/foods';
-import { recognizeMeal, type MealRecognition } from '../../src/lib/ai';
-import { addDays, fmtCN, todayKey } from '../../src/lib/date';
-import { setPendingPhoto } from '../../src/lib/pendingPhoto';
+import { recognizeMeal, type MealItem, type MealRecognition } from '../../src/lib/ai';
+import { addDays, fmtCN, todayKey, weekdayOf } from '../../src/lib/date';
 import { calcNutrition } from '../../src/lib/nutrition';
 import { useDietStore } from '../../src/store/diet';
+import { useJournalStore } from '../../src/store/journal';
 import { useProfileStore } from '../../src/store/profile';
 import { useSettingsStore } from '../../src/store/settings';
 import { C, FONT, R, TAPE } from '../../src/theme';
@@ -26,6 +26,9 @@ export default function DietScreen() {
   const router = useRouter();
   const profile = useProfileStore((s) => s.profile);
   const ai = useSettingsStore((s) => s.ai);
+  const journalEntries = useJournalStore((s) => s.entries);
+  const addJournalEntry = useJournalStore((s) => s.add);
+  const updateJournalEntry = useJournalStore((s) => s.update);
   const logs = useDietStore((s) => s.logs);
   const addLog = useDietStore((s) => s.addLog);
   const removeLog = useDietStore((s) => s.removeLog);
@@ -47,6 +50,7 @@ export default function DietScreen() {
   const [snapUri, setSnapUri] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [snapResult, setSnapResult] = useState<MealRecognition | null>(null);
+  const [snapGrams, setSnapGrams] = useState<string[]>([]);
   const [snapError, setSnapError] = useState<string | null>(null);
   const [snapMeal, setSnapMeal] = useState<MealType>('lunch');
 
@@ -59,10 +63,39 @@ export default function DietScreen() {
     { kcal: 0, protein: 0, carbs: 0, fat: 0 },
   );
 
+  // 近 7 天小结：每天总摄入、达标天数（目标 ±10% 内）、mini 柱图
+  const WEEKDAY_ZH = ['日', '一', '二', '三', '四', '五', '六'];
+  const week7 = Array.from({ length: 7 }, (_, i) => addDays(todayKey(), i - 6));
+  const weekKcals = week7.map((k) => logs.filter((l) => l.date === k).reduce((a, b) => a + b.kcal, 0));
+  const recordedDays = weekKcals.filter((v) => v > 0).length;
+  const avgKcal = recordedDays ? Math.round(weekKcals.reduce((a, b) => a + b, 0) / recordedDays) : 0;
+  const onTargetDays = weekKcals.filter((v) => v > 0 && Math.abs(v - nut.kcal) <= nut.kcal * 0.1).length;
+  const BAR_H = 64;
+  const BAR_CAP = 1.15; // 柱高按目标倍数封顶
+  const barH = (v: number) => (Math.min(v / nut.kcal, BAR_CAP) / BAR_CAP) * BAR_H;
+  const barColor = (v: number) => {
+    if (v <= 0) return C.line;
+    if (v > nut.kcal * 1.1) return C.danger;
+    if (v < nut.kcal * 0.9) return C.warn;
+    return C.good;
+  };
+
   const filtered = useMemo(() => {
     const q = query.trim();
     return FOODS.filter((f) => (cat === '全部' || f.cat === cat) && (!q || f.name.includes(q)));
   }, [query, cat]);
+
+  /** 最近吃过的食物（按频次排序）：库里的走克数表单，手输的直接照抄上次 */
+  const recentItems = useMemo(() => {
+    const byName = new Map<string, { name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number; count: number }>();
+    for (let i = logs.length - 1; i >= 0; i--) {
+      const l = logs[i];
+      const cur = byName.get(l.name);
+      if (cur) cur.count++;
+      else byName.set(l.name, { name: l.name, grams: l.grams, kcal: l.kcal, protein: l.protein, carbs: l.carbs, fat: l.fat, count: 1 });
+    }
+    return [...byName.values()].sort((a, b) => b.count - a.count).slice(0, 8);
+  }, [logs]);
 
   const openSheet = (meal: MealType) => {
     setSheetMeal(meal);
@@ -73,6 +106,29 @@ export default function DietScreen() {
   };
 
   const closeSheet = () => setSheetMeal(null);
+
+  /** 点「最近吃过」：库里的食物带克数进表单；手输过的照抄上次直接入账 */
+  const tapRecent = (r: { name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number }) => {
+    if (!sheetMeal) return;
+    const libFood = FOODS.find((f) => f.name === r.name);
+    if (libFood) {
+      setPickedFood(libFood);
+      setGrams(String(r.grams > 1 ? r.grams : libFood.portionG ?? 100));
+      return;
+    }
+    addLog({
+      id: `fl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      date,
+      meal: sheetMeal,
+      name: r.name,
+      grams: r.grams,
+      kcal: r.kcal,
+      protein: r.protein,
+      carbs: r.carbs,
+      fat: r.fat,
+    });
+    closeSheet();
+  };
 
   const addFromLib = (food: Food) => {
     if (!sheetMeal) return;
@@ -126,13 +182,32 @@ export default function DietScreen() {
   const resetSnap = () => {
     setSnapUri(null);
     setSnapResult(null);
+    setSnapGrams([]);
     setSnapError(null);
     setAnalyzing(false);
   };
 
+  /** AI 估重不一定准：改克数后按比例重算热量与宏量 */
+  const scaleItem = (it: MealItem, grams: number): MealItem => {
+    const g = Math.max(1, Math.round(grams));
+    const r = it.grams > 0 ? g / it.grams : 1;
+    return {
+      ...it,
+      grams: g,
+      kcal: Math.max(1, Math.round(it.kcal * r)),
+      protein: +(it.protein * r).toFixed(1),
+      carbs: +(it.carbs * r).toFixed(1),
+      fat: +(it.fat * r).toFixed(1),
+    };
+  };
+
+  const snapItemsScaled = (snapResult?.items ?? []).map((it, i) =>
+    scaleItem(it, Number(snapGrams[i]) || it.grams),
+  );
+
   const pickSnap = async (fromCamera: boolean) => {
     if (!aiReady) {
-      Alert.alert('先启用 AI', '拍照识餐需要配置 AI 服务。去「我的 → AI 能力」打开开关并填写接口和 Key（智谱 glm-4v-flash 免费可用）。');
+      Alert.alert('先启用 AI', '拍照识餐需要 AI 服务。已内置 DeepSeek（deepseek-flash），去「我的 → AI 能力」打开开关即可。');
       return;
     }
     try {
@@ -154,6 +229,7 @@ export default function DietScreen() {
         const r = await recognizeMeal(ai, uri);
         if (!r.items.length) throw new Error('没认出图里的食物，换个角度试试');
         setSnapResult(r);
+        setSnapGrams(r.items.map((it) => String(it.grams)));
       } catch (e) {
         setSnapError(e instanceof Error ? e.message : '识别失败，请重试');
       } finally {
@@ -166,7 +242,7 @@ export default function DietScreen() {
 
   const addSnapToDiet = () => {
     if (!snapResult) return;
-    for (const it of snapResult.items) {
+    for (const it of snapItemsScaled) {
       addLog({
         id: `fl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         date,
@@ -184,23 +260,27 @@ export default function DietScreen() {
 
   const snapToPlog = () => {
     if (!snapUri) return;
-    const names = (snapResult?.items ?? []).map((i) => i.name).join('、');
-    const total = (snapResult?.items ?? []).reduce((a, b) => a + b.kcal, 0);
-    setPendingPhoto({
-      uri: snapUri,
-      kind: 'meal',
-      note: names ? `${names} · 约${total} kcal` : '',
+    // 直接贴进手帐照片墙（名称用 AI 识别结果），不再进画布编辑器
+    const name = snapItemsScaled.map((i) => i.name).join('·').slice(0, 8) || '这一餐';
+    const photo = { id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, uri: snapUri, name };
+    const host = journalEntries.find((e) => e.date === date && (e.photos?.length ?? 0) > 0 && (e.stickers?.length ?? 0) === 0 && !e.note && !e.title && !e.statsText);
+    if (host) updateJournalEntry({ ...host, photos: [...(host.photos ?? []), photo] });
+    else addJournalEntry({
+      id: `j-${Date.now()}`, date, kind: 'meal', title: '', note: '', stickers: [], doodles: [], photos: [photo], createdAt: Date.now(),
     });
     resetSnap();
-    router.push('/plog');
+    router.navigate('/journal');
   };
 
-  const snapTotal = (snapResult?.items ?? []).reduce((a, b) => a + b.kcal, 0);
+  const snapTotal = snapItemsScaled.reduce((a, b) => a + b.kcal, 0);
+  const snapP = Math.round(snapItemsScaled.reduce((a, b) => a + b.protein, 0));
+  const snapC = Math.round(snapItemsScaled.reduce((a, b) => a + b.carbs, 0));
+  const snapF = Math.round(snapItemsScaled.reduce((a, b) => a + b.fat, 0));
   const snapMealLabel = MEALS.find((m) => m.k === snapMeal)?.label ?? '';
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
-      <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
+      <Scroll contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
         <View style={s.dateNav}>
           <Press style={s.dateBtn} onPress={() => setDate(addDays(date, -1))}>
             <Text style={s.dateBtnT}>‹</Text>
@@ -238,8 +318,37 @@ export default function DietScreen() {
           </Card>
         </Animated.View>
 
-        {/* 拍照识餐 */}
+        {/* 近 7 天小结 */}
         <Animated.View entering={stagger(1)}>
+          <Card style={s.weekCard}>
+            <View style={s.weekHead}>
+              <Text style={s.weekT}>近 7 天</Text>
+              <Sub>
+                {recordedDays > 0
+                  ? `平均 ${avgKcal} kcal/天 · 达标 ${onTargetDays}/${recordedDays} 天（目标 ±10%）`
+                  : '记几天饮食，这里就能看到趋势'}
+              </Sub>
+            </View>
+            <View style={s.barsWrap}>
+              <View style={[s.targetLine, { bottom: barH(nut.kcal) }]} />
+              {week7.map((k, i) => {
+                const v = weekKcals[i];
+                const isToday = k === todayKey();
+                return (
+                  <View key={k} style={s.barCol}>
+                    <View style={[s.bar, { height: Math.max(v > 0 ? 4 : 2, barH(v)), backgroundColor: barColor(v) }]} />
+                    <Text style={[s.barLabel, isToday && { color: C.accent, fontWeight: '800' }]}>
+                      {WEEKDAY_ZH[weekdayOf(k)]}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          </Card>
+        </Animated.View>
+
+        {/* 拍照识餐 */}
+        <Animated.View entering={stagger(2)}>
           <Card style={s.snapCard}>
             <SectionTitle>📷 拍照识餐</SectionTitle>
             {!snapUri ? (
@@ -282,13 +391,38 @@ export default function DietScreen() {
                   <Sticker source={{ uri: snapUri }} rotation={-3} width={104} />
                   <View style={{ flex: 1, gap: 7 }}>
                     {snapResult.note ? <Text style={s.snapNote}>{snapResult.note}</Text> : null}
-                    {snapResult.items.map((it, i) => (
+                    {snapItemsScaled.map((it, i) => (
                       <View key={i} style={s.snapItem}>
-                        <Text style={s.snapItemName} numberOfLines={1}>{it.name}</Text>
-                        <Text style={s.snapItemKcal}>{`${it.grams}g · ${it.kcal} kcal`}</Text>
+                        <View style={{ flex: 1 }}>
+                          <View style={s.snapItemTop}>
+                            <Text style={s.snapItemName} numberOfLines={1}>{it.name}</Text>
+                            <View style={s.snapGramsBox}>
+                              <TextInput
+                                style={s.snapGramsInput}
+                                value={snapGrams[i] ?? String(it.grams)}
+                                onChangeText={(t) => setSnapGrams((arr) => arr.map((g, j) => (j === i ? t.replace(/[^\d]/g, '') : g)))}
+                                keyboardType="number-pad"
+                                maxLength={4}
+                              />
+                              <Text style={s.snapItemKcal}>{`g · ${it.kcal} kcal`}</Text>
+                            </View>
+                          </View>
+                          <View style={s.macroLine}>
+                            <Text style={[s.macroTag, { color: C.good }]}>{`蛋白 ${it.protein}g`}</Text>
+                            <Text style={[s.macroTag, { color: C.warn }]}>{`碳水 ${it.carbs}g`}</Text>
+                            <Text style={[s.macroTag, { color: C.pink }]}>{`脂肪 ${it.fat}g`}</Text>
+                          </View>
+                        </View>
                       </View>
                     ))}
-                    <Text style={s.snapTotal}>{`合计约 ${snapTotal} kcal`}</Text>
+                    <Text style={s.snapTotal}>{`合计约 ${snapTotal} kcal · 估重不准可改克数`}</Text>
+                    <Text style={s.snapMacroTotal}>
+                      <Text style={{ color: C.good }}>{`蛋白 ${snapP}g`}</Text>
+                      {' · '}
+                      <Text style={{ color: C.warn }}>{`碳水 ${snapC}g`}</Text>
+                      {' · '}
+                      <Text style={{ color: C.pink }}>{`脂肪 ${snapF}g`}</Text>
+                    </Text>
                   </View>
                 </View>
                 <View style={s.snapMealRow}>
@@ -335,8 +469,21 @@ export default function DietScreen() {
                     <View style={{ flex: 1 }}>
                       <Text style={s.foodT}>{it.name}</Text>
                       {it.grams > 1 ? <Sub>{`${it.grams}g · ${it.kcal} kcal`}</Sub> : <Sub>{`${it.kcal} kcal`}</Sub>}
+                      {(it.protein > 0 || it.carbs > 0 || it.fat > 0) ? (
+                        <View style={s.macroLine}>
+                          <Text style={[s.macroTag, { color: C.good }]}>{`蛋白${it.protein}`}</Text>
+                          <Text style={[s.macroTag, { color: C.warn }]}>{`碳水${it.carbs}`}</Text>
+                          <Text style={[s.macroTag, { color: C.pink }]}>{`脂肪${it.fat}`}</Text>
+                        </View>
+                      ) : null}
                     </View>
-                    <Pressable hitSlop={8} onPress={() => removeLog(it.id)}>
+                    <Pressable
+                      hitSlop={8}
+                      onPress={() => Alert.alert('删除这条记录？', `「${it.name}」删除后无法恢复。`, [
+                        { text: '取消', style: 'cancel' },
+                        { text: '删除', style: 'destructive', onPress: () => removeLog(it.id) },
+                      ])}
+                    >
                       <Text style={s.delT}>✕</Text>
                     </Pressable>
                   </View>
@@ -351,7 +498,7 @@ export default function DietScreen() {
             {`目标基于你的资料自动计算：基础代谢 ${nut.bmr} kcal，每日消耗 ${nut.tdee} kcal。可在「我的」页修改资料。`}
           </Sub>
         </View>
-      </ScrollView>
+      </Scroll>
 
       {sheetMeal !== null && (
         <View style={s.sheetHost}>
@@ -403,6 +550,23 @@ export default function DietScreen() {
 
                 {mode === 'lib' ? (
                   <>
+                    {recentItems.length > 0 ? (
+                      <View style={{ marginBottom: 10 }}>
+                        <Sub style={{ marginBottom: 6 }}>最近吃过（点一下直接填）</Sub>
+                        <Scroll horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
+                          <View style={s.recentRow}>
+                            {recentItems.map((r) => (
+                              <Chip
+                                key={r.name}
+                                label={r.grams > 1 ? `${r.name} ${r.grams}g` : r.name}
+                                selected={false}
+                                onPress={() => tapRecent(r)}
+                              />
+                            ))}
+                          </View>
+                        </Scroll>
+                      </View>
+                    ) : null}
                     <TextInput
                       style={s.search}
                       value={query}
@@ -410,13 +574,13 @@ export default function DietScreen() {
                       placeholder="搜索食物（如：鸡胸肉）"
                       placeholderTextColor={C.faint}
                     />
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, marginBottom: 8 }}>
+                    <Scroll horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, marginBottom: 8 }}>
                       <View style={s.catRow}>
                         {FOOD_CATS.map((c) => (
                           <Chip key={c} label={c} selected={cat === c} onPress={() => setCat(c)} />
                         ))}
                       </View>
-                    </ScrollView>
+                    </Scroll>
                     <FlatList
                       data={filtered}
                       keyExtractor={(f) => String(f.id)}
@@ -472,6 +636,14 @@ const s = StyleSheet.create({
   overBox: { backgroundColor: '#F6DBD5', borderRadius: R.md, borderWidth: 1.5, borderColor: 'rgba(192,59,46,0.35)', padding: 12 },
   overT: { color: C.danger, fontSize: 13, fontWeight: '600' },
   meal: { paddingVertical: 14 },
+  weekCard: { paddingVertical: 14 },
+  weekHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 4 },
+  weekT: { color: C.text, fontSize: 15, fontWeight: '700' },
+  barsWrap: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, height: 84 },
+  targetLine: { position: 'absolute', left: 0, right: 0, borderStyle: 'dashed', borderWidth: 1, borderColor: C.faint, borderRadius: 0.5 },
+  barCol: { flex: 1, alignItems: 'center', gap: 4 },
+  bar: { width: '70%', maxWidth: 26, borderRadius: 4 },
+  barLabel: { color: C.sub, fontSize: 10, fontWeight: '600' },
   snapCard: { paddingVertical: 14 },
   snapHint: { marginBottom: 12 },
   snapBtnRow: { flexDirection: 'row', gap: 10, alignItems: 'center', marginTop: 4 },
@@ -479,12 +651,23 @@ const s = StyleSheet.create({
   snapStatus: { color: C.text, fontSize: 15, fontWeight: '800', marginBottom: 2 },
   snapErr: { color: C.danger, fontSize: 14, fontWeight: '700' },
   snapNote: { color: C.accent, fontSize: 14, fontFamily: FONT.semi, fontWeight: '600' },
-  snapItem: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: C.line, borderStyle: 'dashed', paddingVertical: 5 },
+  snapItem: { paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: C.line, borderStyle: 'dashed' },
+  snapItemTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   snapItemName: { color: C.text, fontSize: 14, fontWeight: '600', flex: 1 },
   snapItemKcal: { color: C.sub, fontSize: 12, fontWeight: '600', fontFamily: FONT.semi },
   snapTotal: { color: C.text, fontSize: 13, fontWeight: '800', fontFamily: FONT.extra },
+  snapMacroTotal: { color: C.sub, fontSize: 12, fontWeight: '700', fontFamily: FONT.semi, marginTop: 2 },
+  macroLine: { flexDirection: 'row', gap: 10, marginTop: 2 },
+  macroTag: { fontSize: 11, fontWeight: '700', fontFamily: FONT.semi },
   snapMealRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14 },
   snapReset: { color: C.faint, fontSize: 16, fontWeight: '700', paddingLeft: 4 },
+  snapGramsBox: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  snapGramsInput: {
+    color: C.accent, fontSize: 13, fontWeight: '800', fontFamily: FONT.semi,
+    borderBottomWidth: 1.5, borderBottomColor: C.accent, paddingHorizontal: 2, paddingVertical: 0,
+    minWidth: 34, textAlign: 'center',
+  },
+  recentRow: { flexDirection: 'row', gap: 8, paddingVertical: 2 },
   mealHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 4 },
   mealIcon: { fontSize: 17 },
   mealT: { color: C.text, fontSize: 16, fontWeight: '800', flex: 1 },

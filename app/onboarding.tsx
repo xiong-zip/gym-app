@@ -1,8 +1,8 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Button, Card, Chip, Field, NumberInput, Press, Segmented, Sub } from '../src/components/ui';
+import { Button, Card, Chip, Field, NumberInput, Press, Scroll, Segmented, Sub } from '../src/components/ui';
 import { ACTIVITY_ZH, calcNutrition } from '../src/lib/nutrition';
 import { EQUIP_ACCESS_TEXT } from '../src/lib/planner';
 import { useProfileStore } from '../src/store/profile';
@@ -88,6 +88,23 @@ export default function Onboarding() {
     }
   };
 
+  // 越界时告诉用户为什么点不动「下一步」
+  const stepError = (): string | null => {
+    if (step === 0) {
+      const a = Number(age);
+      if (!a || a < 14 || a > 90) return '年龄需填 14-90 之间，未成年人请在家长指导下训练';
+      return null;
+    }
+    if (step === 1) {
+      const h = Number(heightCm);
+      const w = Number(weightKg);
+      if (!h || h < 120 || h > 230) return '身高需填 120-230cm 之间';
+      if (!w || w < 30 || w > 250) return '体重需填 30-250kg 之间';
+      return null;
+    }
+    return null;
+  };
+
   const finish = () => {
     save(buildProfile());
     if (editing) router.back();
@@ -107,7 +124,7 @@ export default function Onboarding() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
+      <Scroll contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
         {step === 0 && (
           <>
             <Field label="性别">
@@ -215,7 +232,13 @@ export default function Onboarding() {
             </Card>
           </>
         )}
-      </ScrollView>
+      </Scroll>
+
+      {stepError() ? (
+        <View style={s.errBox}>
+          <Text style={s.errT}>{`⚠︎ ${stepError()}`}</Text>
+        </View>
+      ) : null}
 
       <View style={s.nav}>
         {step > 0 ? (
@@ -266,6 +289,11 @@ const s = StyleSheet.create({
   listOptTOn: { color: C.accent },
   pickMark: { color: C.accent, fontSize: 18, fontWeight: '900', marginLeft: 'auto' },
   wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  errBox: {
+    marginHorizontal: 20, marginBottom: 8, backgroundColor: '#F6DBD5',
+    borderWidth: 1.5, borderColor: 'rgba(192,59,46,0.35)', borderRadius: R.sm, padding: 10,
+  },
+  errT: { color: C.danger, fontSize: 12, fontWeight: '700' },
   preview: { marginTop: 8 },
   previewMark: {
     alignSelf: 'flex-start', backgroundColor: C.marker, borderRadius: 5, paddingHorizontal: 8, paddingVertical: 2,

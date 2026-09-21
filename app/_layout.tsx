@@ -10,8 +10,12 @@ import { useJournalStore } from '../src/store/journal';
 import { useMetricsStore } from '../src/store/metrics';
 import { useProfileStore } from '../src/store/profile';
 import { useScheduleStore } from '../src/store/schedule';
+import { useSessionDraftStore } from '../src/store/sessionDraft';
 import { useSettingsStore } from '../src/store/settings';
 import { useWorkoutsStore } from '../src/store/workouts';
+import { rescheduleTrainingReminders, setupNotifications } from '../src/lib/notify';
+import '../src/lib/alertPolyfill';
+import '../src/lib/noScrollbar';
 import { C, FONT } from '../src/theme';
 
 export default function RootLayout() {
@@ -28,14 +32,24 @@ export default function RootLayout() {
     useDietStore((s) => s._h) &&
     useMetricsStore((s) => s._h) &&
     useScheduleStore((s) => s._h) &&
+    useSessionDraftStore((s) => s._h) &&
     useJournalStore((s) => s._h);
   const hasProfile = useProfileStore((s) => s.profile !== null);
+  const profile = useProfileStore((s) => s.profile);
+  const reminder = useSettingsStore((s) => s.reminder);
 
   useEffect(() => {
     if (ready && !hasProfile && pathname !== '/onboarding') {
       router.replace('/onboarding');
     }
   }, [ready, hasProfile, pathname, router]);
+
+  // 本地通知：启动即建渠道并滚动重排未来两周的训练日提醒（设置变化也会触发）
+  useEffect(() => {
+    if (!ready) return;
+    void setupNotifications();
+    void rescheduleTrainingReminders(profile, reminder);
+  }, [ready, profile, reminder]);
 
   if (!ready || !fontsLoaded) {
     return (

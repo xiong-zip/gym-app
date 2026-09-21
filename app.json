@@ -14,7 +14,13 @@
     },
     "android": {
       "package": "com.gymapp.fitmate",
-      "permissions": ["CAMERA", "VIBRATE"],
+      "permissions": [
+        "CAMERA",
+        "VIBRATE",
+        "POST_NOTIFICATIONS",
+        "SCHEDULE_EXACT_ALARM",
+        "RECEIVE_BOOT_COMPLETED"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#F5EFE2",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -36,7 +42,10 @@
           "photosPermission": "允许健身搭子访问相册，把照片贴进手帐",
           "microphonePermission": false
         }
-      ]
+      ],
+      "expo-audio",
+      "expo-sharing",
+      "expo-notifications"
     ]
   }
 }

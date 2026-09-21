@@ -9,6 +9,28 @@ export interface ChatMessage {
   content: MessageContent;
 }
 
+/** 把 AI 调用错误翻译成用户能看懂的提示 */
+export function explainAIError(e: unknown): string {
+  if (e instanceof Error) {
+    if (e.name === 'AbortError') return '请求超时，请检查网络后重试';
+    const m = e.message;
+    if (m === '未配置 API Key') return m;
+    if (m === 'Network request failed') return '网络连接失败，请检查网络或接口地址';
+    if (m === 'AI 返回为空') return 'AI 返回内容为空，请重试';
+    const st = m.match(/^AI 接口错误 (\d+)/);
+    if (st) {
+      const code = Number(st[1]);
+      if (code === 401 || code === 403) return 'API Key 无效或没有权限，请检查 Key 是否填对';
+      if (code === 404) return '接口地址或模型名称不存在，请检查地址与模型名';
+      if (code === 429) return '调用频率或额度超限，请稍后再试';
+      if (code >= 500) return 'AI 服务暂时不可用，请稍后再试';
+      return `AI 接口错误 ${code}`;
+    }
+    return m;
+  }
+  return '未知错误';
+}
+
 /** 调用兼容 OpenAI 接口的大模型服务（OpenAI / 智谱 GLM / DeepSeek 等） */
 export async function chat(settings: AISettings, messages: ChatMessage[], temperature = 0.7, timeoutMs = 45000): Promise<string> {
   const base = settings.baseUrl.replace(/\/+$/, '');
@@ -33,8 +55,7 @@ export async function chat(settings: AISettings, messages: ChatMessage[], temper
     if (typeof content !== 'string' || !content.trim()) throw new Error('AI 返回为空');
     return content;
   } catch (e: unknown) {
-    if (e instanceof Error && e.name === 'AbortError') throw new Error('AI 请求超时');
-    throw e;
+    throw new Error(explainAIError(e));
   } finally {
     clearTimeout(timer);
   }
@@ -78,6 +99,19 @@ const num = (v: unknown): number => {
 };
 
 /** 拍照识餐：传照片 base64（或 data URI），返回识别出的食物列表 */
+/** 手帐照片名称识别：说出照片主体（食物/器械/场景均可），返回如「鸭腿饭」 */
+export async function recognizePhotoName(settings: AISettings, imageBase64: string): Promise<string> {
+  const uri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
+  const raw = await chat(settings, [{
+    role: 'user',
+    content: [
+      { type: 'text', text: '用不超过6个中文字说出这张照片里主体的名称（食物就说菜名，如「鸭腿饭」；动作就说动作名，如「卧推」）。只返回名称本身，不要标点和其他文字。' },
+      { type: 'image_url', image_url: { url: uri } },
+    ],
+  }], 0.2, 45000);
+  return raw.trim().replace(/["'。,.!！?？\s]/g, '').slice(0, 8) || '照片';
+}
+
 export async function recognizeMeal(settings: AISettings, imageBase64: string): Promise<MealRecognition> {
   const uri = imageBase64.startsWith('data:') ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
   const raw = await chat(settings, [{

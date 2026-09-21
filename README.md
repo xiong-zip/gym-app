@@ -29,17 +29,19 @@ npx expo start
 
 > 建议 Node.js ≥ 20.19.4（当前 SDK 的推荐版本）。
 
-## AI 配置（可选）
+## AI 配置
 
-App 默认使用内置规则引擎，离线可用。要启用 AI，在「我的 → AI 能力」打开开关并填入任意**兼容 OpenAI 接口**的服务：
+App **默认已接入 DeepSeek**（`deepseek-flash`，支持文本与视觉）：AI 计划生成、拍照识餐开箱即用，无需任何配置。请求从手机直连 DeepSeek 官方接口。
+
+要换成其他服务，在「我的 → AI 能力」点预设或手动修改，任意**兼容 OpenAI 接口**的服务均可：
 
 | 服务 | 接口地址 | 模型示例 |
 |---|---|---|
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-flash` |
 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-flash` |
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
 
-API Key 只保存在本机，请求从手机直接发到你填的服务地址。AI 生成的计划会校验动作 ID 必须来自本地动作库，解析失败自动回退规则引擎。
+关闭 AI 后使用内置规则引擎，完全离线可用。AI 生成的计划会校验动作 ID 必须来自本地动作库，解析失败自动回退规则引擎。
 
 ## 打包发布
 

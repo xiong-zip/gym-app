@@ -46,3 +46,8 @@ yarn-error.*
 
 # 打包产物（本地构建的 APK）
 *.apk
+
+# JVM 崩溃日志（本地构建残留）
+hs_err_pid*.log
+# ZCode 会话目录
+.zcode/

@@ -268,7 +268,7 @@ export async function cutoutSticker(src: string): Promise<CutoutResult | null> {
         const si = (minY + y) * w + (minX + x);
         const di = (y * cw + x) * 4;
         const m = mask[si];
-        const inRing = ring[si] === 1;
+        const inRing = ring[si] !== 0; // dilate 输出是 0/255，不能与 1 比较
         const soft = Math.max(0, Math.min(1, (m - 0.42) / 0.16)); // 0..1 软边
         const so = (minY + y) * w * 4 + (minX + x) * 4;
         if (inRing) {

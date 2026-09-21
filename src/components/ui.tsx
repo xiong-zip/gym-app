@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Image, ImageSourcePropType, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
+import { forwardRef, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Image, ImageSourcePropType, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ScrollViewProps, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 import Animated, { FadeInDown, FadeOutUp, useAnimatedProps, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
@@ -8,6 +8,19 @@ import { C, DUR, FONT, R, SH } from '../theme';
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+/* ---------- 统一滚动容器：强制隐藏滚动指示条（Web 端滚动条由全局 CSS 隐藏） ---------- */
+
+export const Scroll = forwardRef<ScrollView, ScrollViewProps>(function Scroll(props, ref) {
+  return (
+    <ScrollView
+      ref={ref}
+      {...props}
+      showsVerticalScrollIndicator={false}
+      showsHorizontalScrollIndicator={false}
+    />
+  );
+});
 
 /* ---------- 触感反馈 ---------- */
 

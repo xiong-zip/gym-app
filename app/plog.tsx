@@ -1,12 +1,12 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Image, Platform, Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import * as ImagePicker from 'expo-image-picker';
 import Svg, { Polyline } from 'react-native-svg';
-import { Button, DotsBg, Press, Sub, Tape, haptic } from '../src/components/ui';
+import { Button, DotsBg, Press, Scroll, Sub, Tape, haptic } from '../src/components/ui';
 import { cutoutSticker } from '../src/lib/cutout';
 import { takePendingPhoto } from '../src/lib/pendingPhoto';
 import { todayKey } from '../src/lib/date';
@@ -36,13 +36,18 @@ export default function PlogScreen() {
   const editing = editingEntry !== null;
 
   const [kind, setKind] = useState<JournalKind>((['workout', 'meal', 'free'] as const).includes(params.kind as JournalKind) ? (params.kind as JournalKind) : 'free');
+  const [title, setTitle] = useState('');
   const [note, setNote] = useState('');
   const [stickers, setStickers] = useState<JournalSticker[]>([]);
   const [paths, setPaths] = useState<DrawPath[]>([]);
   const [tool, setTool] = useState<'sticker' | 'pen'>('sticker');
   const [penColor, setPenColor] = useState(PEN_COLORS[0]);
+  const [eraser, setEraser] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const [canvas, setCanvas] = useState({ w: 0, h: 0 });
+  // 画布尺寸由布局直接推导（页宽-32，宽高比 3/4）——
+  // 环境里 onLayout 从未触发过，贴纸/涂鸦坐标全靠它，不能依赖回调
+  const { width: winW } = useWindowDimensions();
+  const canvas = { w: Math.max(120, winW - 32), h: Math.max(160, (winW - 32) * 4 / 3) };
   const [cutting, setCutting] = useState(false);
   const activePath = useRef<DrawPath | null>(null);
 
@@ -52,6 +57,7 @@ export default function PlogScreen() {
     if (loaded.current || !editingEntry) return;
     loaded.current = true;
     setKind(editingEntry.kind);
+    setTitle(editingEntry.title);
     setNote(editingEntry.note);
     setStickers(editingEntry.stickers);
     setPaths(editingEntry.doodles);
@@ -70,6 +76,26 @@ export default function PlogScreen() {
     }
   }, []);
 
+  // 从总结页 / 识餐进入时的默认标题
+  useEffect(() => {
+    if (editingEntry) return;
+    const t = typeof params.title === 'string' && params.title ? params.title : '';
+    setTitle(t);
+  }, [editingEntry, params.title]);
+
+  // 画布上已有内容时，退出先确认，防止误触丢内容
+  const dirty = stickers.length > 0 || paths.length > 0 || note.trim() !== '' || title.trim() !== '';
+  const quit = () => {
+    if (!dirty) {
+      router.back();
+      return;
+    }
+    Alert.alert('退出编辑？', '这一页还没保存，退出后内容会丢失。', [
+      { text: '继续编辑', style: 'cancel' },
+      { text: '不保存退出', style: 'destructive', onPress: () => router.back() },
+    ]);
+  };
+
   const d = new Date();
   const dateText = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
 
@@ -82,20 +108,18 @@ export default function PlogScreen() {
     ]);
   };
 
-  /** 原生端自动抠图描边；Web 端或失败时回退整张照片 */
+  /** 自动抠图描边（原生/浏览器都在本地跑 u2netp）；失败时回退整张照片 */
   const addPhotoAsSticker = async (uri: string) => {
     haptic('light');
-    if (Platform.OS !== 'web') {
-      setCutting(true);
-      try {
-        const res = await cutoutSticker(uri);
-        if (res) {
-          addSticker(res.uri, { cutout: true, iw: res.width, ih: res.height });
-          return;
-        }
-      } finally {
-        setCutting(false);
+    setCutting(true);
+    try {
+      const res = await cutoutSticker(uri);
+      if (res) {
+        addSticker(res.uri, { cutout: true, iw: res.width, ih: res.height });
+        return;
       }
+    } finally {
+      setCutting(false);
     }
     addSticker(uri);
   };
@@ -126,16 +150,31 @@ export default function PlogScreen() {
     setStickers((arr) => arr.map((s) => (s.id === selected ? fn(s) : s)));
   };
 
-  /* ---------- 涂鸦手势 ---------- */
+  /* ---------- 涂鸦手势（含橡皮擦：擦掉划过的笔画） ---------- */
+
+  const eraseAt = (x: number, y: number) => {
+    if (!canvas.w || !canvas.h) return;
+    const ex = x / canvas.w;
+    const ey = y / canvas.h;
+    setPaths((arr) => arr.filter((p) => !p.points.some((pt) => Math.hypot(pt[0] - ex, pt[1] - ey) < 0.045)));
+  };
 
   const drawGesture = Gesture.Pan()
     .runOnJS(true)
     .onBegin((e) => {
       if (!canvas.w || !canvas.h) return;
+      if (eraser) {
+        eraseAt(e.x, e.y);
+        return;
+      }
       activePath.current = { id: `dp-${Date.now()}`, color: penColor, width: 4, points: [[e.x / canvas.w, e.y / canvas.h]] };
       setPaths((arr) => [...arr, activePath.current!]);
     })
     .onUpdate((e) => {
+      if (eraser) {
+        eraseAt(e.x, e.y);
+        return;
+      }
       if (!activePath.current || !canvas.w || !canvas.h) return;
       activePath.current.points.push([e.x / canvas.w, e.y / canvas.h]);
       setPaths((arr) => [...arr]);
@@ -144,11 +183,13 @@ export default function PlogScreen() {
 
   const save = () => {
     const doodles = paths.map((p) => ({ id: p.id, color: p.color, width: p.width, points: p.points }));
+    const finalTitle = title.trim() || (typeof params.title === 'string' && params.title ? params.title : `${KIND_ZH[kind]}手帐`);
     if (editingEntry) {
-      // 编辑既有手帐：保留 id / 日期 / 标题 / 训练数据
+      // 编辑既有手帐：保留 id / 日期 / 训练数据
       updateEntry({
         ...editingEntry,
         kind,
+        title: finalTitle,
         note: note.trim(),
         stickers,
         doodles,
@@ -158,7 +199,7 @@ export default function PlogScreen() {
         id: `j-${Date.now()}`,
         date: todayKey(),
         kind,
-        title: typeof params.title === 'string' && params.title ? params.title : `${KIND_ZH[kind]}手帐`,
+        title: finalTitle,
         note: note.trim(),
         stickers,
         doodles,
@@ -175,7 +216,7 @@ export default function PlogScreen() {
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <View style={s.head}>
-        <Pressable hitSlop={10} onPress={() => router.back()}>
+        <Pressable hitSlop={10} onPress={quit}>
           <Text style={s.closeT}>✕</Text>
         </Pressable>
         <Text style={s.headT}>{editing ? '编辑手帐' : '记一页手帐'}</Text>
@@ -184,7 +225,7 @@ export default function PlogScreen() {
         </Press>
       </View>
 
-      <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
+      <Scroll contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
         <View style={s.kindRow}>
           {(['workout', 'meal', 'free'] as const).map((k) => (
             <Press key={k} style={[s.kindChip, kind === k && s.kindChipOn]} onPress={() => setKind(k)}>
@@ -193,11 +234,17 @@ export default function PlogScreen() {
           ))}
         </View>
 
+        <TextInput
+          style={s.titleInput}
+          value={title}
+          onChangeText={setTitle}
+          placeholder="给这一页起个标题…"
+          placeholderTextColor={C.faint}
+          maxLength={20}
+        />
+
         {/* 画布：点阵纸页 */}
-        <View
-          style={s.canvas}
-          onLayout={(e) => setCanvas({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}
-        >
+        <View style={s.canvas}>
           <DotsBg width="100%" height="100%" />
           <Svg style={StyleSheet.absoluteFill} width="100%" height="100%">
             {paths.map((p) => (
@@ -223,6 +270,7 @@ export default function PlogScreen() {
               isSelected={selected === st.id}
               onTap={() => setSelected((cur) => (cur === st.id ? null : st.id))}
               onCommit={commitSticker}
+              onScaleCommit={(id, scale) => setStickers((arr) => arr.map((x) => (x.id === id ? { ...x, scale } : x)))}
             />
           ))}
 
@@ -230,11 +278,14 @@ export default function PlogScreen() {
             <Text style={s.dateT}>{dateText}</Text>
             <Text style={s.kindTag}>{KIND_ZH[kind]}</Text>
           </View>
-          {typeof params.stats === 'string' && params.stats ? (
-            <View style={s.statsStamp} pointerEvents="none">
-              <Text style={s.statsT} numberOfLines={2}>{params.stats}</Text>
-            </View>
-          ) : null}
+          {(() => {
+            const stamp = typeof params.stats === 'string' && params.stats ? params.stats : editingEntry?.statsText;
+            return stamp ? (
+              <View style={s.statsStamp} pointerEvents="none">
+                <Text style={s.statsT} numberOfLines={2}>{stamp}</Text>
+              </View>
+            ) : null;
+          })()}
 
           {cutting ? (
             <View style={s.cuttingChip} pointerEvents="none">
@@ -269,10 +320,18 @@ export default function PlogScreen() {
           {tool === 'pen' ? (
             <View style={s.colorRow}>
               {PEN_COLORS.map((c) => (
-                <Press key={c} style={[s.colorDot, penColor === c && { borderWidth: 3, borderColor: C.text }]} onPress={() => { setPenColor(c); haptic('light'); }}>
+                <Press
+                  key={c}
+                  style={[s.colorDot, penColor === c && !eraser && { borderWidth: 3, borderColor: C.text }]}
+                  onPress={() => { setPenColor(c); setEraser(false); haptic('light'); }}
+                >
                   <View style={{ width: 20, height: 20, borderRadius: 99, backgroundColor: c }} />
                 </Press>
               ))}
+              <View style={{ flex: 1 }} />
+              <Press style={[s.toolBtn, eraser && s.toolBtnOn]} onPress={() => { setEraser((v) => !v); haptic('light'); }}>
+                <Text style={[s.toolT, eraser && s.toolTOn]}>🧽 橡皮</Text>
+              </Press>
             </View>
           ) : (
             <View style={s.photoRow}>
@@ -315,7 +374,7 @@ export default function PlogScreen() {
           placeholderTextColor={C.faint}
           maxLength={60}
         />
-      </ScrollView>
+      </Scroll>
     </SafeAreaView>
   );
 }
@@ -323,7 +382,7 @@ export default function PlogScreen() {
 /* ---------- 画布内可拖拽贴纸 ---------- */
 
 function CanvasSticker({
-  sticker, canvas, interactive, isSelected, onTap, onCommit,
+  sticker, canvas, interactive, isSelected, onTap, onCommit, onScaleCommit,
 }: {
   sticker: JournalSticker;
   canvas: { w: number; h: number };
@@ -331,11 +390,27 @@ function CanvasSticker({
   isSelected: boolean;
   onTap: () => void;
   onCommit: (id: string, x: number, y: number) => void;
+  onScaleCommit: (id: string, scale: number) => void;
 }) {
   const tx = useSharedValue(sticker.x * canvas.w);
   const ty = useSharedValue(sticker.y * canvas.h);
   const startX = useSharedValue(0);
   const startY = useSharedValue(0);
+  const sScale = useSharedValue(sticker.scale);
+  const baseScale = useSharedValue(1);
+  // 画布尺寸未就绪（首次 onLayout 前）不渲染：保证 sharedValue 初始化时坐标有效
+  const canvasReady = canvas.w > 0 && canvas.h > 0;
+
+  // ± 按钮改 prop 时同步到手势侧，保证两套缩放不打架
+  useEffect(() => { sScale.value = sticker.scale; }, [sticker.scale, sScale]);
+  // 画布尺寸在 onLayout 后才就绪：mount 时 canvas.w=0 把 tx/ty 初始化成了 0，这里补定位
+  useEffect(() => {
+    if (canvas.w > 0 && canvas.h > 0) {
+      tx.value = sticker.x * canvas.w;
+      ty.value = sticker.y * canvas.h;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas.w, canvas.h]);
 
   const pan = Gesture.Pan()
     .runOnJS(true)
@@ -343,12 +418,22 @@ function CanvasSticker({
     .onStart(() => { startX.value = tx.value; startY.value = ty.value; })
     .onUpdate((e) => { tx.value = startX.value + e.translationX; ty.value = startY.value + e.translationY; })
     .onEnd(() => onCommit(sticker.id, tx.value / Math.max(1, canvas.w), ty.value / Math.max(1, canvas.h)));
+  const pinch = Gesture.Pinch()
+    .runOnJS(true)
+    .enabled(interactive)
+    .onStart(() => { baseScale.value = sScale.value; })
+    .onUpdate((e) => { sScale.value = Math.min(3, Math.max(0.4, baseScale.value * e.scale)); })
+    .onEnd(() => onScaleCommit(sticker.id, sScale.value));
   const tap = Gesture.Tap().runOnJS(true).enabled(interactive).onStart(() => onTap());
-  const gesture = Gesture.Simultaneous(pan, tap);
+  const gesture = Gesture.Simultaneous(pan, tap, pinch);
 
-  const aStyle = useAnimatedStyle(() => ({ transform: [{ translateX: tx.value }, { translateY: ty.value }] }), [tx, ty]);
-  const w = 118 * sticker.scale;
+  const aStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: tx.value }, { translateY: ty.value }, { scale: sScale.value }],
+  }), [tx, ty, sScale]);
+  // 贴纸基准宽 = 画布宽 30%（显示端 JournalMini 同比例），缩放手势只做视觉变换
+  const w = Math.max(60, canvas.w * 0.3);
 
+  if (!canvasReady) return null;
   return (
     <GestureDetector gesture={gesture}>
       <Animated.View style={[{ position: 'absolute', left: 0, top: 0 }, aStyle]}>
@@ -365,10 +450,10 @@ function CanvasSticker({
             style={[
               s.stickerCard,
               { transform: [{ rotate: `${sticker.rot}deg` }] },
-              isSelected && { borderColor: C.accent, borderWidth: 2 },
+              isSelected && { borderColor: C.accent },
             ]}
           >
-            <Image source={{ uri: sticker.uri }} style={{ width: w, height: w * 1.2, borderRadius: 2 }} resizeMode="cover" />
+            <Image source={{ uri: sticker.uri }} style={{ width: w, height: w * 1.2, borderRadius: 5 }} resizeMode="cover" />
             <Tape width={44} rotate={-4} />
           </View>
         )}
@@ -389,6 +474,11 @@ const s = StyleSheet.create({
   saveT: { color: C.onAccent, fontWeight: '800', fontSize: 14 },
   body: { padding: 16, gap: 12, paddingBottom: 40 },
   kindRow: { flexDirection: 'row', gap: 8 },
+  titleInput: {
+    color: C.accent, fontSize: 14, fontWeight: '700',
+    backgroundColor: C.card, borderWidth: 1.5, borderColor: C.inkAlpha, borderRadius: R.sm,
+    height: 40, paddingHorizontal: 12, paddingVertical: 0,
+  },
   kindChip: {
     paddingHorizontal: 16, paddingVertical: 7, borderRadius: 999, borderWidth: 1.5, borderColor: C.inkAlpha,
     backgroundColor: C.card, transform: [{ rotate: '-0.6deg' }],
@@ -438,7 +528,8 @@ const s = StyleSheet.create({
     height: 48, paddingHorizontal: 14,
   },
   stickerCard: {
-    backgroundColor: '#FFFFFF', padding: 6, paddingBottom: 10, borderRadius: 3,
-    borderWidth: 1, borderColor: C.inkAlphaSoft, ...SH.sm,
+    // 贴纸式白描边 + 硬偏移阴影（不是相框）
+    backgroundColor: '#FFFDF6', borderWidth: 3.5, borderColor: '#FFFDF6',
+    borderRadius: 9, ...SH.md,
   },
 });

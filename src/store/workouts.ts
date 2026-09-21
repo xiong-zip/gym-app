@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { GeneratedPlan, WorkoutLog } from '../types';
+import type { ExerciseLog, GeneratedPlan, WorkoutLog } from '../types';
 
 interface WorkoutsState {
   logs: WorkoutLog[];
@@ -65,6 +65,22 @@ export function lastPerformanceFor(
     if (e && e.sets.length > 0) {
       const s = e.sets[e.sets.length - 1];
       return { weight: s.weight, reps: s.reps, date: logs[i].date };
+    }
+  }
+  return null;
+}
+
+/** 某动作最近一次的全部组（不只最后一组），训练时逐组对照用 */
+export function lastSetsFor(
+  logs: WorkoutLog[],
+  exerciseId: number,
+  name?: string,
+): { sets: { weight: number; reps: number }[]; date: string } | null {
+  const match = (e: ExerciseLog) => (exerciseId > 0 ? e.exerciseId === exerciseId : e.name === (name ?? '').trim());
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const e = logs[i].exercises.find(match);
+    if (e && e.sets.length > 0) {
+      return { sets: e.sets.map((st) => ({ weight: st.weight, reps: st.reps })), date: logs[i].date };
     }
   }
   return null;

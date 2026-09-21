@@ -139,6 +139,12 @@ export interface DoodlePath {
   points: number[][]; // 归一化坐标点 [x, y]，0..1
 }
 
+export interface JournalPhoto {
+  id: string;
+  uri: string;        // data URI（base64）或本地文件 URI
+  name: string;       // AI 识别的名称（如「鸭腿饭」）
+}
+
 export interface JournalEntry {
   id: string;
   date: string;       // YYYY-MM-DD
@@ -147,6 +153,7 @@ export interface JournalEntry {
   note: string;
   stickers: JournalSticker[];
   doodles: DoodlePath[];
+  photos?: JournalPhoto[]; // 照片墙模式：直接添加的照片 + 名称，不可拖动
   statsText?: string; // 自动盖章的数据（训练容量 / 餐次）
   createdAt: number;
 }

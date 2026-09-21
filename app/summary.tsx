@@ -1,7 +1,7 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Animated, Button, Card, Confetti, Stamp, Stat, Sub, stagger, useCountUp } from '../src/components/ui';
+import { Animated, Button, Card, Confetti, Scroll, Stamp, Stat, Sub, stagger, useCountUp } from '../src/components/ui';
 import { fmtDur } from '../src/lib/date';
 import { useWorkoutsStore } from '../src/store/workouts';
 import { C, FONT, R } from '../src/theme';
@@ -26,20 +26,27 @@ export default function SummaryScreen() {
   const totalSets = log.exercises.reduce((a, e) => a + e.sets.length, 0);
   const volume = Math.round(log.exercises.reduce((a, e) => a + e.sets.reduce((b, s) => b + s.weight * s.reps, 0), 0));
 
-  // 新纪录检测：对比本次之前同动作的历史最高重量
+  // Epley 估算 1RM：重量×次数综合换算，轻重量多次数的好成绩也能被认出来
+  const e1rm = (w: number, r: number) => (w > 0 && r > 0 ? Math.round(w * (1 + r / 30)) : 0);
+
+  // 新纪录 / 新动作检测：对比本次之前同动作的历史表现
   // 动作库动作按 ID 归组；自定义动作（ID <= 0）按名称归组
   const keyOf = (e: { exerciseId: number; name: string }) => (e.exerciseId > 0 ? `id:${e.exerciseId}` : `name:${e.name}`);
   const priorLogs = logs.filter((l) => l.id !== log.id);
-  const prExercises = log.exercises.filter((e) => {
-    const key = keyOf(e);
-    const prevMax = Math.max(
-      0,
-      ...priorLogs
-        .flatMap((pl) => pl.exercises.filter((pe) => keyOf(pe) === key).flatMap((pe) => pe.sets.map((s) => s.weight))),
-    );
-    const curMax = Math.max(...e.sets.map((s) => s.weight), 0);
-    return prevMax > 0 && curMax > prevMax;
-  });
+  const prExercises = log.exercises
+    .filter((e) => e.sets.length > 0)
+    .map((e) => {
+      const prevSets = priorLogs
+        .flatMap((pl) => pl.exercises.filter((pe) => keyOf(pe) === keyOf(e)).flatMap((pe) => pe.sets));
+      const prevBest = Math.max(0, ...prevSets.map((st) => e1rm(st.weight, st.reps)));
+      const bestSet = e.sets.reduce((a, b) => (e1rm(b.weight, b.reps) > e1rm(a.weight, a.reps) ? b : a), e.sets[0]);
+      const curBest = e1rm(bestSet.weight, bestSet.reps);
+      return { e, prevBest, curBest, bestSet };
+    });
+  const prList = prExercises.filter((x) => x.prevBest > 0 && x.curBest > x.prevBest);
+  const newList = prExercises.filter((x) => x.prevBest === 0);
+
+  const fmtSet = (st: { weight: number; reps: number }) => (st.weight > 0 ? `${st.weight}kg×${st.reps}` : `${st.reps}次`);
 
   const statsText = `${log.title} · ${totalSets}组 · ${volume}kg · ${fmtDur(log.durationSec)}`;
 
@@ -53,7 +60,7 @@ export default function SummaryScreen() {
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <Confetti />
-      <ScrollView contentContainerStyle={s.body}>
+      <Scroll contentContainerStyle={s.body}>
         <Animated.View entering={stagger(0)} style={s.stampWrap}>
           <Stamp label="训练完成" fontSize={20} rotate={-6} />
         </Animated.View>
@@ -73,28 +80,44 @@ export default function SummaryScreen() {
           </Card>
         </Animated.View>
 
-        {prExercises.length > 0 && (
+        {prList.length > 0 && (
           <Animated.View entering={stagger(2)}>
             <Card style={s.prCard}>
               <View style={s.prHead}>
                 <Text style={s.prEmoji}>🏆</Text>
                 <Text style={s.prT}>新纪录！</Text>
               </View>
-              {prExercises.map((e) => {
-                const best = Math.max(...e.sets.map((s) => s.weight));
-                return (
-                  <Text key={e.exerciseId} style={s.prItem}>{`✎ ${e.name} · ${best}kg`}</Text>
-                );
-              })}
+              {prList.map((x) => (
+                <Text key={x.e.exerciseId} style={s.prItem}>
+                  {`✎ ${x.e.name} · ${fmtSet(x.bestSet)}（估算1RM ${x.prevBest}→${x.curBest}kg）`}
+                </Text>
+              ))}
+              <Text style={s.prFoot}>按「重量×次数」综合估算判断，轻重量多次数的好成绩也算破纪录。</Text>
+            </Card>
+          </Animated.View>
+        )}
+
+        {newList.length > 0 && (
+          <Animated.View entering={stagger(2)}>
+            <Card style={s.newCard}>
+              <View style={s.prHead}>
+                <Text style={s.prEmoji}>✨</Text>
+                <Text style={s.newT}>新动作解锁</Text>
+              </View>
+              {newList.map((x) => (
+                <Text key={x.e.exerciseId} style={s.newItem}>{`✎ ${x.e.name} · ${fmtSet(x.bestSet)}`}</Text>
+              ))}
+              <Text style={s.prFoot}>下次会自动参考这次的重量，从今天开始攒纪录。</Text>
             </Card>
           </Animated.View>
         )}
 
         <Animated.View entering={stagger(3)} style={s.btnCol}>
           <Button title="📷 拍一张手帐" onPress={goPlog} />
+          <Button title="🧘 拉伸放松" kind="ghost" onPress={() => router.push({ pathname: '/warmup', params: { tab: 'stretch' } })} />
           <Button title="回到首页" kind="ghost" onPress={() => router.navigate('/')} />
         </Animated.View>
-      </ScrollView>
+      </Scroll>
     </SafeAreaView>
   );
 }
@@ -114,5 +137,9 @@ const s = StyleSheet.create({
   prEmoji: { fontSize: 20 },
   prT: { color: C.markerInk, fontSize: 16, fontWeight: '800' },
   prItem: { color: C.markerInk, fontSize: 13, fontWeight: '600', marginBottom: 4 },
+  prFoot: { color: C.sub, fontSize: 11, marginTop: 6 },
+  newCard: { backgroundColor: '#EAF1E4', borderColor: 'rgba(62,142,78,0.3)' },
+  newT: { color: C.good, fontSize: 16, fontWeight: '800' },
+  newItem: { color: C.good, fontSize: 13, fontWeight: '600', marginBottom: 4 },
   btnCol: { gap: 10, marginTop: 8 },
 });

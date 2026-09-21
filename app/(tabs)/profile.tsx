@@ -1,22 +1,35 @@
 import { useRouter } from 'expo-router';
-import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { useState } from 'react';
+import { Alert, Platform, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Animated, Button, Card, SectionTitle, Sub, TextInputLine, stagger } from '../../src/components/ui';
-import { ACTIVITY_ZH, calcNutrition, GENDER_ZH, GOAL_ZH } from '../../src/lib/nutrition';
+import { Animated, Button, Card, Chip, Press, Scroll, SectionTitle, Sub, TextInputLine, stagger } from '../../src/components/ui';
+import { chat } from '../../src/lib/ai';
+import { requestNotificationPermission, rescheduleTrainingReminders } from '../../src/lib/notify';
+import { ACTIVITY_ZH, bmi, calcNutrition, GENDER_ZH, GOAL_ZH } from '../../src/lib/nutrition';
 import { EQUIP_ACCESS_TEXT } from '../../src/lib/planner';
 import { useDietStore } from '../../src/store/diet';
-import { useMetricsStore } from '../../src/store/metrics';
+import { useJournalStore } from '../../src/store/journal';
+import { latestWeight, useMetricsStore } from '../../src/store/metrics';
 import { useProfileStore } from '../../src/store/profile';
 import { useScheduleStore } from '../../src/store/schedule';
+import { useSessionDraftStore } from '../../src/store/sessionDraft';
 import { useSettingsStore } from '../../src/store/settings';
 import { useWorkoutsStore } from '../../src/store/workouts';
 import { C, FONT } from '../../src/theme';
 
+const AI_PRESETS = [
+  { label: 'DeepSeek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' },
+  { label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+  { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+];
+
 const AI_HINTS = [
-  'OpenAI：https://api.openai.com/v1 · gpt-4o-mini',
-  '智谱 GLM：https://open.bigmodel.cn/api/paas/v4 · glm-4-flash',
-  'DeepSeek：https://api.deepseek.com · deepseek-chat',
-  '拍照识餐需视觉模型：glm-4v-flash（免费）/ gpt-4o-mini',
+  '内置已接 DeepSeek（deepseek-flash）：支持拍照识餐与计划生成，开箱即用',
+  '也可换成其他兼容 OpenAI 的服务；Key 只保存在本机。',
+];
+
+const TIME_PRESETS: [string, number, number][] = [
+  ['7:00', 7, 0], ['12:00', 12, 0], ['18:00', 18, 0], ['19:00', 19, 0], ['20:00', 20, 0], ['21:00', 21, 0],
 ];
 
 export default function ProfileScreen() {
@@ -24,20 +37,59 @@ export default function ProfileScreen() {
   const profile = useProfileStore((s) => s.profile);
   const ai = useSettingsStore((s) => s.ai);
   const setAI = useSettingsStore((s) => s.setAI);
+  const metrics = useMetricsStore((s) => s.entries);
   const clearWorkouts = useWorkoutsStore((s) => s.clear);
   const clearDiet = useDietStore((s) => s.clear);
   const clearMetrics = useMetricsStore((s) => s.clear);
   const clearSchedule = useScheduleStore((s) => s.clear);
+  const clearJournal = useJournalStore((s) => s.clear);
+  const clearDraft = useSessionDraftStore((s) => s.clear);
   const clearProfile = useProfileStore((s) => s.clear);
+
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const sound = useSettingsStore((s) => s.sound);
+  const setSound = useSettingsStore((s) => s.setSound);
+  const reminder = useSettingsStore((s) => s.reminder);
+  const setReminder = useSettingsStore((s) => s.setReminder);
+
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+
+  const toggleReminder = async (v: boolean) => {
+    if (v) {
+      if (Platform.OS === 'web') {
+        Alert.alert('仅手机端支持', '本地通知需要在手机 App 上开启。');
+        return;
+      }
+      const ok = await requestNotificationPermission();
+      if (!ok) {
+        Alert.alert('未获得通知权限', '去系统设置 → 应用 → 健身搭子，开启「通知」权限后再回来打开。');
+        return;
+      }
+      setReminder({ enabled: true });
+      void rescheduleTrainingReminders(profile, { ...reminder, enabled: true });
+    } else {
+      setReminder({ enabled: false });
+      void rescheduleTrainingReminders(profile, { ...reminder, enabled: false });
+    }
+  };
+
+  const changeReminderTime = (hour: number, minute: number) => {
+    setReminder({ hour, minute });
+    void rescheduleTrainingReminders(profile, { ...reminder, hour, minute });
+  };
 
   if (!profile) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
   const nut = calcNutrition(profile);
   const expLabel = profile.experience === 'beginner' ? '新手' : profile.experience === 'intermediate' ? '中级' : '高级';
+  const bmiVal = bmi(latestWeight(metrics) ?? profile.weightKg, profile.heightCm);
 
   const rows: [string, string][] = [
     ['性别 / 年龄', `${GENDER_ZH[profile.gender]} · ${profile.age}岁`],
     ['身高 / 体重', `${profile.heightCm}cm · ${profile.weightKg}kg`],
+    ['BMI', `${bmiVal}（按最新体重）`],
     ['目标', GOAL_ZH[profile.goal]],
     ['训练经验', expLabel],
     ['每周训练', `${profile.daysPerWeek} 天`],
@@ -56,6 +108,8 @@ export default function ProfileScreen() {
           clearDiet();
           clearMetrics();
           clearSchedule();
+          clearJournal();
+          clearDraft();
           clearProfile();
           router.replace('/onboarding');
         },
@@ -63,9 +117,27 @@ export default function ProfileScreen() {
     ]);
   };
 
+  const applyPreset = (p: (typeof AI_PRESETS)[number]) => {
+    setAI({ baseUrl: p.baseUrl, model: p.model });
+    setTestMsg(null);
+  };
+
+  const testConn = async () => {
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      await chat(ai, [{ role: 'user', content: '请只回复：ok' }], 0.2, 15000);
+      setTestMsg({ ok: true, text: '连接成功，模型已正常回复 ✓' });
+    } catch (e) {
+      setTestMsg({ ok: false, text: e instanceof Error ? e.message : '连接失败，请重试' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
-      <ScrollView contentContainerStyle={s.body}>
+      <Scroll contentContainerStyle={s.body}>
         <Text style={s.title}>我的</Text>
 
         <Animated.View entering={stagger(0)}>
@@ -114,28 +186,118 @@ export default function ProfileScreen() {
               AI 能力
             </SectionTitle>
             <Sub>{ai.enabled ? '已启用：训练计划与减脂建议会优先调用 AI' : '未启用：使用内置规则引擎（无需联网）'}</Sub>
-            <View style={{ gap: 10, marginTop: 12, opacity: ai.enabled ? 1 : 0.45 }}>
-              <TextInputLine value={ai.baseUrl} onChange={(v) => setAI({ baseUrl: v })} placeholder="接口地址（兼容 OpenAI 格式）" />
-              <TextInputLine value={ai.model} onChange={(v) => setAI({ model: v })} placeholder="模型名称" />
-              <TextInputLine value={ai.apiKey} onChange={(v) => setAI({ apiKey: v })} placeholder="API Key" secure />
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+              {AI_PRESETS.map((p) => {
+                const on = ai.baseUrl === p.baseUrl;
+                return (
+                  <Press
+                    key={p.label}
+                    style={[s.presetChip, on && s.presetOn]}
+                    onPress={() => applyPreset(p)}
+                  >
+                    <Text style={[s.presetT, on && { color: C.accent }]}>{p.label}</Text>
+                  </Press>
+                );
+              })}
+            </View>
+            <View style={{ gap: 10, marginTop: 10, opacity: ai.enabled ? 1 : 0.45 }}>
+              <TextInputLine value={ai.baseUrl} onChange={(v) => { setAI({ baseUrl: v }); setTestMsg(null); }} placeholder="接口地址（兼容 OpenAI 格式）" />
+              <TextInputLine value={ai.model} onChange={(v) => { setAI({ model: v }); setTestMsg(null); }} placeholder="模型名称" />
+              <TextInputLine value={ai.apiKey} onChange={(v) => { setAI({ apiKey: v }); setTestMsg(null); }} placeholder="API Key" secure />
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 }}>
+              <Button
+                title="测试连接"
+                kind="ghost"
+                small
+                loading={testing}
+                disabled={!ai.apiKey || !ai.baseUrl || !ai.model || testing}
+                onPress={testConn}
+              />
+              {testMsg ? (
+                <Text style={{ flex: 1, fontSize: 12, fontWeight: '600', color: testMsg.ok ? C.good : C.danger }}>
+                  {testMsg.text}
+                </Text>
+              ) : null}
             </View>
             <View style={{ marginTop: 12, gap: 4 }}>
               {AI_HINTS.map((h) => (
                 <Sub key={h} style={{ fontSize: 11 }}>{h}</Sub>
               ))}
             </View>
-            <Sub style={{ marginTop: 8, fontSize: 11 }}>Key 只保存在本机，请求直接从手机发到你所填的服务地址。</Sub>
           </Card>
         </Animated.View>
 
         <Animated.View entering={stagger(3)}>
+          <Card style={{ marginTop: 14 }}>
+            <SectionTitle>提醒与反馈</SectionTitle>
+            <View style={s.switchRow}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={s.rowTitleT}>组间休息提示音</Text>
+                <Sub>倒计时结束「叮」一声，手机放地上也听得见（静音模式照常响）</Sub>
+              </View>
+              <Switch
+                value={sound}
+                onValueChange={setSound}
+                trackColor={{ false: C.line, true: C.accent }}
+                thumbColor="#FFFDF6"
+              />
+            </View>
+            <View style={[s.switchRow, { marginTop: 14 }]}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={s.rowTitleT}>训练日提醒</Text>
+                <Sub>
+                  {reminder.enabled
+                    ? `每个训练日 ${pad2(reminder.hour)}:${pad2(reminder.minute)} 提醒，通知带当天部位`
+                    : '按你的周计划在训练日提醒，App 没开也能收到'}
+                </Sub>
+              </View>
+              <Switch
+                value={reminder.enabled}
+                onValueChange={(v) => { void toggleReminder(v); }}
+                trackColor={{ false: C.line, true: C.accent }}
+                thumbColor="#FFFDF6"
+              />
+            </View>
+            {reminder.enabled ? (
+              <View style={{ gap: 8, marginTop: 12 }}>
+                <Sub style={{ fontSize: 11 }}>提醒时间（快选或自定义）</Sub>
+                <View style={s.chipWrap}>
+                  {TIME_PRESETS.map(([label, h, m]) => (
+                    <Chip
+                      key={label}
+                      label={label}
+                      selected={reminder.hour === h && reminder.minute === m}
+                      onPress={() => changeReminderTime(h, m)}
+                    />
+                  ))}
+                </View>
+                <View style={s.chipWrap}>
+                  {Array.from({ length: 18 }, (_, i) => i + 6).map((h) => (
+                    <Chip key={h} label={`${h}点`} selected={reminder.hour === h} onPress={() => changeReminderTime(h, reminder.minute)} />
+                  ))}
+                </View>
+                <View style={s.chipWrap}>
+                  {[0, 15, 30, 45].map((m) => (
+                    <Chip key={m} label={`${pad2(m)}分`} selected={reminder.minute === m} onPress={() => changeReminderTime(reminder.hour, m)} />
+                  ))}
+                </View>
+                <Sub style={{ fontSize: 11, marginTop: 4 }}>
+                  小米 / 华为等机型请在系统里允许健身搭子自启动并加入省电白名单，否则通知可能被拦截。
+                </Sub>
+              </View>
+            ) : null}
+          </Card>
+        </Animated.View>
+
+        <Animated.View entering={stagger(4)}>
           <Card style={{ marginTop: 14 }}>
             <SectionTitle>数据管理</SectionTitle>
             <Button title="清空所有数据" kind="danger" small onPress={clearAll} />
           </Card>
         </Animated.View>
 
-        <Animated.View entering={stagger(4)}>
+        <Animated.View entering={stagger(5)}>
           <Card style={{ marginTop: 14 }}>
             <SectionTitle>关于</SectionTitle>
             <Sub>
@@ -144,7 +306,7 @@ export default function ProfileScreen() {
             </Sub>
           </Card>
         </Animated.View>
-      </ScrollView>
+      </Scroll>
     </SafeAreaView>
   );
 }
@@ -162,4 +324,13 @@ const s = StyleSheet.create({
   nutGrid: { flexDirection: 'row', marginBottom: 12 },
   nutItem: { flex: 1, alignItems: 'center' },
   nutV: { color: C.text, fontSize: 17, fontWeight: '800', marginBottom: 3, fontFamily: FONT.extra },
+  switchRow: { flexDirection: 'row', alignItems: 'center' },
+  rowTitleT: { color: C.text, fontSize: 14, fontWeight: '700', marginBottom: 3 },
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  presetChip: {
+    borderRadius: 999, borderWidth: 1.5, borderColor: C.inkAlpha, backgroundColor: C.card,
+    paddingHorizontal: 14, paddingVertical: 8,
+  },
+  presetOn: { borderColor: C.accent, backgroundColor: '#FBEAE2' },
+  presetT: { color: C.sub, fontSize: 13, fontWeight: '700' },
 });
