@@ -8,6 +8,8 @@ import { FOOD_CATS, FOODS } from '../../src/data/foods';
 import { recognizeMeal, type MealItem, type MealRecognition } from '../../src/lib/ai';
 import { addDays, fmtCN, todayKey, weekdayOf } from '../../src/lib/date';
 import { calcNutrition } from '../../src/lib/nutrition';
+import { attachCutout } from '../../src/lib/photoSticker';
+import { frequentCombos, suggestMeal, type MealCombo } from '../../src/lib/suggest';
 import { useDietStore } from '../../src/store/diet';
 import { useJournalStore } from '../../src/store/journal';
 import { useProfileStore } from '../../src/store/profile';
@@ -54,6 +56,9 @@ export default function DietScreen() {
   const [snapError, setSnapError] = useState<string | null>(null);
   const [snapMeal, setSnapMeal] = useState<MealType>('lunch');
 
+  // 下一餐推荐的换一批（同一时段内保持稳定，点了才换）
+  const [suggestSeed, setSuggestSeed] = useState(0);
+
   if (!profile) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
   const nut = calcNutrition(profile);
@@ -97,6 +102,36 @@ export default function DietScreen() {
     return [...byName.values()].sort((a, b) => b.count - a.count).slice(0, 8);
   }, [logs]);
 
+  /** 常吃组合：同一餐反复一起出现的搭配，一键整餐入账 */
+  const combos = useMemo(() => frequentCombos(logs), [logs]);
+
+  /** 按剩余宏量推荐下一餐（蛋白优先，热量不超额度） */
+  const remain = {
+    kcal: Math.max(0, nut.kcal - Math.round(sum.kcal)),
+    protein: Math.max(0, nut.protein - sum.protein),
+    carbs: Math.max(0, nut.carbs - sum.carbs),
+    fat: Math.max(0, nut.fat - sum.fat),
+  };
+  const suggestion = suggestMeal(remain, `${date}|${Math.floor(new Date().getHours() / 3)}|${suggestSeed}`);
+
+  const addCombo = (c: MealCombo) => {
+    if (!sheetMeal) return;
+    for (const it of c.items) {
+      addLog({
+        id: `fl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        date,
+        meal: sheetMeal,
+        name: it.name,
+        grams: it.grams,
+        kcal: it.kcal,
+        protein: it.protein,
+        carbs: it.carbs,
+        fat: it.fat,
+      });
+    }
+    closeSheet();
+  };
+
   const openSheet = (meal: MealType) => {
     setSheetMeal(meal);
     setMode('lib');
@@ -107,25 +142,21 @@ export default function DietScreen() {
 
   const closeSheet = () => setSheetMeal(null);
 
-  /** 点「最近吃过」：库里的食物带克数进表单；手输过的照抄上次直接入账 */
+  /** 点「最近吃过」：按上次份量直接入账；想改克数就走下面的食物库 */
   const tapRecent = (r: { name: string; grams: number; kcal: number; protein: number; carbs: number; fat: number }) => {
     if (!sheetMeal) return;
     const libFood = FOODS.find((f) => f.name === r.name);
-    if (libFood) {
-      setPickedFood(libFood);
-      setGrams(String(r.grams > 1 ? r.grams : libFood.portionG ?? 100));
-      return;
-    }
+    const g = Math.max(1, r.grams > 1 ? r.grams : libFood?.portionG ?? 100);
     addLog({
       id: `fl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       date,
       meal: sheetMeal,
       name: r.name,
-      grams: r.grams,
-      kcal: r.kcal,
-      protein: r.protein,
-      carbs: r.carbs,
-      fat: r.fat,
+      grams: g,
+      kcal: libFood ? Math.round((libFood.kcal * g) / 100) : r.kcal,
+      protein: libFood ? +((libFood.protein * g) / 100).toFixed(1) : r.protein,
+      carbs: libFood ? +((libFood.carbs * g) / 100).toFixed(1) : r.carbs,
+      fat: libFood ? +((libFood.fat * g) / 100).toFixed(1) : r.fat,
     });
     closeSheet();
   };
@@ -177,6 +208,27 @@ export default function DietScreen() {
     if (h < 14) return 'lunch';
     if (h < 17) return 'snack';
     return 'dinner';
+  };
+
+  const nextMealLabel = MEALS.find((m) => m.k === autoMealByTime())?.label ?? '加餐';
+
+  /** 一键记入：推荐组合按当前时段自动归到对应餐 */
+  const addSuggestion = () => {
+    if (!suggestion) return;
+    const meal = autoMealByTime();
+    for (const it of suggestion.items) {
+      addLog({
+        id: `fl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        date,
+        meal,
+        name: it.name,
+        grams: it.grams,
+        kcal: it.kcal,
+        protein: it.protein,
+        carbs: it.carbs,
+        fat: it.fat,
+      });
+    }
   };
 
   const resetSnap = () => {
@@ -260,7 +312,7 @@ export default function DietScreen() {
 
   const snapToPlog = () => {
     if (!snapUri) return;
-    // 直接贴进手帐照片墙（名称用 AI 识别结果），不再进画布编辑器
+    // 直接贴进手帐照片墙（名称用 AI 识别结果），后台再抠成白边贴纸
     const name = snapItemsScaled.map((i) => i.name).join('·').slice(0, 8) || '这一餐';
     const photo = { id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, uri: snapUri, name };
     const host = journalEntries.find((e) => e.date === date && (e.photos?.length ?? 0) > 0 && (e.stickers?.length ?? 0) === 0 && !e.note && !e.title && !e.statsText);
@@ -268,6 +320,7 @@ export default function DietScreen() {
     else addJournalEntry({
       id: `j-${Date.now()}`, date, kind: 'meal', title: '', note: '', stickers: [], doodles: [], photos: [photo], createdAt: Date.now(),
     });
+    void attachCutout(photo.id, photo.uri);
     resetSnap();
     router.navigate('/journal');
   };
@@ -315,6 +368,35 @@ export default function DietScreen() {
                 </View>
               ))}
             </View>
+          </Card>
+        </Animated.View>
+
+        {/* 下一餐怎么吃：按剩余宏量推荐组合 */}
+        <Animated.View entering={stagger(1)}>
+          <Card style={s.nextCard} taped={TAPE.green}>
+            <View style={s.weekHead}>
+              <Text style={s.weekT}>🥗 下一餐怎么吃</Text>
+              <Sub>{`还差 ${remain.kcal} kcal · 蛋白 ${Math.round(remain.protein)}g · 碳水 ${Math.round(remain.carbs)}g`}</Sub>
+            </View>
+            {suggestion ? (
+              <>
+                <View style={s.sugList}>
+                  {suggestion.items.map((it, i) => (
+                    <View key={`${it.name}-${i}`} style={s.sugRow}>
+                      <Text style={s.sugName} numberOfLines={1}>{it.name}</Text>
+                      <Text style={s.sugNums}>{`${it.grams}g · ${it.kcal} kcal · 蛋白${it.protein}g`}</Text>
+                    </View>
+                  ))}
+                </View>
+                <Sub>{`合计约 ${suggestion.kcal} kcal · 蛋白 ${suggestion.protein}g · 碳水 ${suggestion.carbs}g，吃了不超今天额度`}</Sub>
+                <View style={s.snapBtnRow}>
+                  <Button title={`一键记入${nextMealLabel}`} small onPress={addSuggestion} />
+                  <Button title="换一换" kind="ghost" small onPress={() => setSuggestSeed((v) => v + 1)} />
+                </View>
+              </>
+            ) : (
+              <Sub>今天额度快用完了，多喝水，明天再战 💪</Sub>
+            )}
           </Card>
         </Animated.View>
 
@@ -550,9 +632,22 @@ export default function DietScreen() {
 
                 {mode === 'lib' ? (
                   <>
+                    {combos.length > 0 ? (
+                      <View style={{ marginBottom: 12 }}>
+                        <Sub style={{ marginBottom: 6 }}>常吃组合（点一下整餐入账）</Sub>                        {combos.slice(0, 4).map((c) => (
+                          <Press key={c.name} style={s.comboRow} onPress={() => addCombo(c)}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={s.comboT} numberOfLines={1}>{c.name}</Text>
+                              <Sub style={{ fontSize: 11 }}>{`约 ${c.kcal} kcal · 吃过 ${c.count} 次（份量照最近一次）`}</Sub>
+                            </View>
+                            <Text style={s.comboAdd}>＋</Text>
+                          </Press>
+                        ))}
+                      </View>
+                    ) : null}
                     {recentItems.length > 0 ? (
                       <View style={{ marginBottom: 10 }}>
-                        <Sub style={{ marginBottom: 6 }}>最近吃过（点一下直接填）</Sub>
+                        <Sub style={{ marginBottom: 6 }}>最近吃过（点一下按上次份量直接记）</Sub>
                         <Scroll horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
                           <View style={s.recentRow}>
                             {recentItems.map((r) => (
@@ -637,6 +732,20 @@ const s = StyleSheet.create({
   overT: { color: C.danger, fontSize: 13, fontWeight: '600' },
   meal: { paddingVertical: 14 },
   weekCard: { paddingVertical: 14 },
+  nextCard: { paddingVertical: 14 },
+  sugList: { gap: 2, marginBottom: 8 },
+  sugRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10,
+    paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: C.line, borderStyle: 'dashed',
+  },
+  sugName: { color: C.text, fontSize: 14, fontWeight: '700', flex: 1 },
+  sugNums: { color: C.sub, fontSize: 11, fontWeight: '600', fontFamily: FONT.semi },
+  comboRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 9,
+    borderBottomWidth: 1, borderBottomColor: C.line, borderStyle: 'dashed',
+  },
+  comboT: { color: C.text, fontSize: 14, fontWeight: '700' },
+  comboAdd: { color: C.accent, fontSize: 18, fontWeight: '800', paddingHorizontal: 4 },
   weekHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 4 },
   weekT: { color: C.text, fontSize: 15, fontWeight: '700' },
   barsWrap: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, height: 84 },

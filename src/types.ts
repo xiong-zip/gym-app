@@ -66,7 +66,12 @@ export interface GeneratedPlan {
 }
 
 export interface SetLog { weight: number; reps: number }
-export interface ExerciseLog { exerciseId: number; name: string; sets: SetLog[] }
+export interface ExerciseLog {
+  exerciseId: number;
+  name: string;
+  sets: SetLog[];
+  timed?: boolean; // 计时动作：reps 存秒数，容量/1RM 统计时排除
+}
 export interface WorkoutLog {
   id: string;
   date: string; // YYYY-MM-DD
@@ -143,6 +148,12 @@ export interface JournalPhoto {
   id: string;
   uri: string;        // data URI（base64）或本地文件 URI
   name: string;       // AI 识别的名称（如「鸭腿饭」）
+  /** nosh 风贴纸：主体抠图 + 白描边后的透明 PNG（照片墙直接展示它，失败则回退整张照片） */
+  cutoutUri?: string;
+  cutoutW?: number;
+  cutoutH?: number;
+  /** 已尝试过抠图（含失败），不再重试 */
+  cutoutTried?: boolean;
 }
 
 export interface JournalEntry {

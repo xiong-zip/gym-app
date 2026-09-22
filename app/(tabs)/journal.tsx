@@ -1,14 +1,18 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { JournalMini } from '../../src/components/JournalMini';
 import { MonthCalendar } from '../../src/components/MonthCalendar';
-import { Animated, Button, Card, NumberInput, Press, Scroll, SectionTitle, Sheet, Stamp, Stat, Sub, stagger } from '../../src/components/ui';
+import { HeatCalendar } from '../../src/components/HeatCalendar';
+import { StrengthChart } from '../../src/components/StrengthChart';
+import { Animated, Button, Card, Chip, NumberInput, Press, Scroll, SectionTitle, Sheet, Stamp, Stat, Sub, stagger } from '../../src/components/ui';
 import { MUSCLE_ZH } from '../../src/data/exercises';
-import { fmtCN, fmtDur, todayKey, weekdayOf } from '../../src/lib/date';
-import { recognizePhotoName } from '../../src/lib/ai';
+import { addDays, fmtCN, fmtDur, todayKey, weekdayOf } from '../../src/lib/date';
+import { attachAiName, attachCutout, tiltOf } from '../../src/lib/photoSticker';
+import { progressByExercise, volumeOfLog } from '../../src/lib/review';
+import { seasonOf, seasonStickerFor } from '../../src/lib/season';
 import { shareViewShot } from '../../src/lib/shot';
 import { useDietStore } from '../../src/store/diet';
 import { useJournalStore } from '../../src/store/journal';
@@ -21,6 +25,15 @@ import type { JournalPhoto } from '../../src/types';
 
 const WEEK_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
 const pad = (n: number) => String(n).padStart(2, '0');
+
+/** 贴纸展示盒：不同照片等比缩放，墙上视觉尺寸一致 */
+const STICKER_BOX = 108;
+function stickerSize(p: JournalPhoto) {
+  const w = p.cutoutW || 1;
+  const h = p.cutoutH || 1;
+  const k = Math.min(STICKER_BOX / w, STICKER_BOX / h);
+  return { width: Math.round(w * k), height: Math.round(h * k) };
+}
 
 export default function JournalScreen() {
   const router = useRouter();
@@ -60,9 +73,10 @@ export default function JournalScreen() {
   const [wInput, setWInput] = useState('');
   // 每页手帐的可截图视图（分享图片用）
   const shotRefs = useRef<Record<string, View | null>>({});
-  // 照片墙：添加照片（AI 识别名称）
+  // 照片墙：添加照片（AI 识别名称 + 主体抠图贴纸）
   const ai = useSettingsStore((s) => s.ai);
   const [addingPhoto, setAddingPhoto] = useState(false);
+  const [busy, setBusy] = useState<string[]>([]);
 
   const shareEntry = (id: string, title: string) => {
     void shareViewShot({ current: shotRefs.current[id] ?? null }, `${title} · 健身搭子手帐`);
@@ -81,9 +95,22 @@ export default function JournalScreen() {
   const ym = `${cursor.y}-${pad(cursor.m + 1)}`;
   const monthLogs = logs.filter((l) => l.date.startsWith(ym));
   const monthSets = monthLogs.reduce((a, l) => a + l.exercises.reduce((b, e) => b + e.sets.length, 0), 0);
-  const monthVolume = Math.round(monthLogs.reduce(
-    (a, l) => a + l.exercises.reduce((b, e) => b + e.sets.reduce((c, x) => c + x.weight * x.reps, 0), 0), 0,
-  ));
+  const monthVolume = monthLogs.reduce((a, l) => a + volumeOfLog(l), 0);
+
+  // 打卡热力：近 90 天按日容量上色，点格子跳到那天
+  const heatData: Record<string, number> = {};
+  for (const l of logs) heatData[l.date] = (heatData[l.date] ?? 0) + volumeOfLog(l);
+  const heatDays = new Set(logs.filter((l) => l.date >= addDays(today, -90)).map((l) => l.date)).size;
+
+  // 力量进步：各动作估算 1RM 曲线（练得最多的排前面）
+  const progresses = useMemo(() => progressByExercise(logs), [logs]);
+  const topProgress = useMemo(
+    () => [...progresses].sort((a, b) => b.points.length - a.points.length).slice(0, 8),
+    [progresses],
+  );
+  const [strKey, setStrKey] = useState<string | null>(null);
+  const strSel = topProgress.find((p) => p.key === strKey) ?? topProgress[0] ?? null;
+  const season = seasonOf();
 
   const delEntry = (id: string) => {
     Alert.alert('删除这页手帐？', '删除后无法恢复', [
@@ -114,29 +141,53 @@ export default function JournalScreen() {
 
   const pickPhotos = async (fromCamera: boolean) => {
     if (addingPhoto) return;
+    setAddingPhoto(true);
     try {
       const opts: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], quality: 0.55, base64: true, allowsEditing: false };
       const res = fromCamera
         ? await ImagePicker.launchCameraAsync(opts)
         : await ImagePicker.launchImageLibraryAsync({ ...opts, allowsMultipleSelection: true });
       if (res.canceled) return;
-      setAddingPhoto(true);
-      const newPhotos: JournalPhoto[] = [];
-      for (const asset of res.assets) {
-        const uri = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri;
-        let name = '照片';
-        if (ai.enabled && ai.apiKey) {
-          try { name = await recognizePhotoName(ai, uri); } catch { /* 识别失败就叫「照片」 */ }
-        }
-        newPhotos.push({ id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, uri, name });
+      // 先立刻上图，抠图与 AI 命名在后台补（等待期间照片墙不空着）
+      const added: JournalPhoto[] = res.assets.map((asset) => ({
+        id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        uri: asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri,
+        name: '照片',
+      }));
+      if (added.length) {
+        addPhotos(added);
+        added.forEach((p) => { void runPhotoJobs(p.id, p.uri); });
       }
-      if (newPhotos.length) addPhotos(newPhotos);
     } catch {
       // 取消或权限拒绝时静默
     } finally {
       setAddingPhoto(false);
     }
   };
+
+  /** 后台处理一张新照片：抠成贴纸 + AI 起名（各自完成即回填，互不阻塞） */
+  const runPhotoJobs = async (id: string, uri: string): Promise<void> => {
+    setBusy((arr) => [...arr, id]);
+    const useAI = ai.enabled && !!ai.apiKey;
+    await Promise.all([
+      attachCutout(id, uri),
+      useAI ? attachAiName(id, uri, ai) : Promise.resolve(),
+    ]);
+    setBusy((arr) => arr.filter((x) => x !== id));
+  };
+
+  // 老照片（没有 cutoutTried 标记）进入视野时补一次抠图：不用重拍也能变成贴纸
+  const queued = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!isToday) return;
+    const pending = dayPhotos.filter((p) => !p.cutoutTried && !p.cutoutUri && !queued.current.has(p.id));
+    if (!pending.length) return;
+    pending.forEach((p) => queued.current.add(p.id));
+    void (async () => {
+      for (const p of pending) await runPhotoJobs(p.id, p.uri);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isToday, dayPhotos.map((p) => p.id).join(',')]);
 
   const addPhotos = (photos: JournalPhoto[]) => {
     const target = entries.find((e) => e.date === sel && (e.photos?.length ?? 0) > 0 && (e.stickers?.length ?? 0) === 0 && (e.doodles?.length ?? 0) === 0 && !e.note && !e.title && !e.statsText);
@@ -196,18 +247,6 @@ export default function JournalScreen() {
           </Card>
         </Animated.View>
 
-        <Animated.View entering={stagger(1)}>
-          <Card>
-            <View style={s.statRow}>
-              <Stat label="本月训练" value={monthLogs.length} unit="次" color={C.accent} count />
-              <View style={s.statDivider} />
-              <Stat label="本月总组数" value={monthSets} unit="组" count />
-              <View style={s.statDivider} />
-              <Stat label="本月总容量" value={monthVolume} unit="kg" count />
-            </View>
-          </Card>
-        </Animated.View>
-
         {/* 体重趋势卡已移到首页统计卡内 */}
 
         {/* 所选日期 */}
@@ -224,9 +263,9 @@ export default function JournalScreen() {
           <Card style={s.block}>
             <Text style={s.blockT}>🏋️ 训练</Text>
             {dayLogs.length > 0 ? (
-              dayLogs.map((l) => {
-                const sets = l.exercises.reduce((a, e) => a + e.sets.length, 0);
-                const volume = Math.round(l.exercises.reduce((a, e) => a + e.sets.reduce((b, x) => b + x.weight * x.reps, 0), 0));
+                  dayLogs.map((l) => {
+                    const sets = l.exercises.reduce((a, e) => a + e.sets.length, 0);
+                    const volume = volumeOfLog(l);
                 return (
                   <View key={l.id} style={s.logBox}>
                     <View style={s.logHead}>
@@ -311,20 +350,40 @@ export default function JournalScreen() {
           <Card style={s.block}>
             <View style={s.blockHead}>
               <Text style={s.blockT}>📷 手帐</Text>
-              {dayPhotos.length > 0 ? <Sub>{`${dayPhotos.length} 张 · 长按可删除`}</Sub> : null}
+              {dayPhotos.length > 0 ? (
+                <Sub>
+                  {busy.length > 0 ? `✂️ 抠图中 ${busy.length} 张…` : `${dayPhotos.length} 张 · 长按可删除`}
+                </Sub>
+              ) : null}
             </View>
 
-            {/* 照片墙：长按删除，名称在图下方 */}
+            {/* 照片墙：抠图成功后按贴纸展示（nosh 风），长按删除 */}
             {dayPhotos.length > 0 ? (
               <View style={s.photoGrid}>
                 {dayPhotos.map((p) => (
                   <Pressable key={p.id} onLongPress={() => isToday && delPhoto(p)} delayLongPress={400}>
-                    <View style={s.photoCard}>
-                      <Image source={{ uri: p.uri }} style={s.photoImg} resizeMode="cover" />
-                      <View style={s.photoNameTag}>
-                        <Text style={s.photoNameT} numberOfLines={1}>{p.name}</Text>
+                    {p.cutoutUri ? (
+                      <View style={s.stickerCell}>
+                        <View style={s.stickerBox}>
+                          <Image
+                            source={{ uri: p.cutoutUri }}
+                            style={[stickerSize(p), { transform: [{ rotate: `${tiltOf(p.id)}deg` }] }]}
+                            resizeMode="contain"
+                          />
+                        </View>
+                        <Text style={s.stickerName} numberOfLines={1}>{p.name}</Text>
                       </View>
-                    </View>
+                    ) : (
+                      <View style={s.photoCard}>
+                        <Image source={{ uri: p.uri }} style={s.photoImg} resizeMode="cover" />
+                        <Text style={s.photoSeason}>{seasonStickerFor(p.id, season)}</Text>
+                        <View style={s.photoNameTag}>
+                          <Text style={s.photoNameT} numberOfLines={1}>
+                            {busy.includes(p.id) ? '✂️ 抠图中…' : p.name}
+                          </Text>
+                        </View>
+                      </View>
+                    )}
                   </Pressable>
                 ))}
               </View>
@@ -381,10 +440,11 @@ export default function JournalScreen() {
             {isToday ? (
               <View style={s.addPhotoRow}>
                 <Button
-                  title={addingPhoto ? '🧐 AI 认图中…' : '＋ 添加照片'}
+                  title="＋ 添加照片"
                   onPress={() => pickPhotos(false)}
                   disabled={addingPhoto}
                 />
+                <Sub style={{ marginTop: 8 }}>自动抠成白边贴纸 + AI 起名，几秒后自动完成</Sub>
               </View>
             ) : null}
           </Card>
@@ -407,6 +467,64 @@ export default function JournalScreen() {
                 <Text style={s.wBtnT}>{dayWeight ? '改体重' : '记体重'}</Text>
               </Press>
             </View>
+          </Card>
+        </Animated.View>
+
+        {/* 分析区放在当天内容之后：先看今天，再看趋势 */}
+        <View style={s.sectionHead}>
+          <Text style={s.sectionHeadT}>趋势与纪录</Text>
+          <Sub>看长期变化时才往下翻</Sub>
+        </View>
+
+        <Animated.View entering={stagger(5)}>
+          <Card>
+            <View style={s.statRow}>
+              <Stat label="本月训练" value={monthLogs.length} unit="次" color={C.accent} count />
+              <View style={s.statDivider} />
+              <Stat label="本月总组数" value={monthSets} unit="组" count />
+              <View style={s.statDivider} />
+              <Stat label="本月总容量" value={monthVolume} unit="kg" count />
+            </View>
+          </Card>
+        </Animated.View>
+
+        {/* 打卡热力：近 90 天一眼看清节奏 */}
+        <Animated.View entering={stagger(5)}>
+          <Card style={s.heatCard}>
+            <View style={s.blockHead}>
+              <Text style={s.blockT}>🔥 打卡热力</Text>
+              <Sub>{`近 90 天练了 ${heatDays} 天`}</Sub>
+            </View>
+            <HeatCalendar data={heatData} selected={sel} onSelect={setSel} weeks={13} />
+          </Card>
+        </Animated.View>
+
+        {/* 力量进步：各动作估算 1RM 曲线 */}
+        <Animated.View entering={stagger(6)}>
+          <Card style={s.block}>
+            <View style={s.blockHead}>
+              <Text style={s.blockT}>📈 力量进步</Text>
+              {strSel ? <Sub>{`PR ${strSel.best}kg · ${fmtCN(strSel.bestDate)}`}</Sub> : null}
+            </View>
+            {topProgress.length > 0 && strSel ? (
+              <>
+                <Scroll horizontal style={{ flexGrow: 0, marginBottom: 6 }} contentContainerStyle={s.strChipRow}>
+                  {topProgress.map((p) => (
+                    <Chip key={p.key} label={p.name} selected={p.key === strSel.key} onPress={() => setStrKey(p.key)} />
+                  ))}
+                </Scroll>
+                {strSel.points.length >= 2 ? (
+                  <>
+                    <StrengthChart points={strSel.points} />
+                    <Sub>{`首次 ${strSel.first}kg → 最新 ${strSel.points[strSel.points.length - 1].value}kg · 共 ${strSel.points.length} 次训练（按 Epley 公式估算 1RM）`}</Sub>
+                  </>
+                ) : (
+                  <Sub>{`「${strSel.name}」目前只有 1 次带重量的记录，多练几次就能看到曲线`}</Sub>
+                )}
+              </>
+            ) : (
+              <Sub>训练时把重量填上，这里会出现每个动作的 1RM 进步曲线与新纪录。</Sub>
+            )}
           </Card>
         </Animated.View>
       </Scroll>
@@ -474,6 +592,14 @@ const s = StyleSheet.create({
     borderWidth: 1.5, borderColor: C.inkAlphaSoft, paddingBottom: 8, ...SH.sm,
   },
   photoImg: { width: '100%', height: 110, borderRadius: 8 },
+  photoSeason: { position: 'absolute', top: 3, right: 6, fontSize: 15 },
+  // nosh 风贴纸单元：透明 PNG 直接落在纸面上，只有一点点摆放角度
+  stickerCell: { width: 128, alignItems: 'center', paddingTop: 4, paddingBottom: 2 },
+  stickerBox: { height: STICKER_BOX, alignItems: 'center', justifyContent: 'center' },
+  stickerName: {
+    marginTop: 4, color: C.text, fontSize: 14, fontFamily: FONT.hand, fontWeight: '700',
+    maxWidth: 122, textAlign: 'center',
+  },
   photoNameTag: { alignItems: 'center', paddingTop: 5 },
   photoNameT: { color: C.text, fontSize: 13, fontWeight: '700', fontFamily: FONT.semi },
   addPhotoRow: { marginTop: 12 },
@@ -483,10 +609,14 @@ const s = StyleSheet.create({
   editT: { color: C.accent, fontSize: 13, fontWeight: '700' },
   delT: { color: C.faint, fontSize: 15, fontWeight: '700' },
   foot: { color: C.faint, fontSize: 11, marginTop: 6, fontWeight: '600' },
+  sectionHeadT: { color: C.text, fontSize: 15, fontWeight: '800' },
   dataRow: { flexDirection: 'row', alignItems: 'center', gap: 16 },
   dataItem: { flex: 1 },
   dataV: { color: C.text, fontSize: 15, fontWeight: '700', marginTop: 3, fontFamily: FONT.extra },
   linkT: { color: C.accent, fontSize: 12, fontWeight: '700' },
+  heatCard: { paddingVertical: 14 },
+  strChipRow: { gap: 8, paddingVertical: 4 },
+  sectionHead: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', paddingHorizontal: 4, marginTop: 4 },
   wBtn: { backgroundColor: C.card, borderWidth: 1.5, borderColor: C.accent, borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9 },
   wBtnT: { color: C.accent, fontSize: 12, fontWeight: '800' },
 });

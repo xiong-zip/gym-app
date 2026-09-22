@@ -51,6 +51,8 @@ export default function ProfileScreen() {
 
   const sound = useSettingsStore((s) => s.sound);
   const setSound = useSettingsStore((s) => s.setSound);
+  const voice = useSettingsStore((s) => s.voice);
+  const setVoice = useSettingsStore((s) => s.setVoice);
   const reminder = useSettingsStore((s) => s.reminder);
   const setReminder = useSettingsStore((s) => s.setReminder);
 
@@ -245,6 +247,18 @@ export default function ProfileScreen() {
             </View>
             <View style={[s.switchRow, { marginTop: 14 }]}>
               <View style={{ flex: 1, paddingRight: 12 }}>
+                <Text style={s.rowTitleT}>语音搭子播报</Text>
+                <Sub>组间倒计时「还有三十秒」、结束语音提醒，练的时候不用盯屏幕（仅手机端）</Sub>
+              </View>
+              <Switch
+                value={voice}
+                onValueChange={setVoice}
+                trackColor={{ false: C.line, true: C.accent }}
+                thumbColor="#FFFDF6"
+              />
+            </View>
+            <View style={[s.switchRow, { marginTop: 14 }]}>
+              <View style={{ flex: 1, paddingRight: 12 }}>
                 <Text style={s.rowTitleT}>训练日提醒</Text>
                 <Sub>
                   {reminder.enabled
@@ -301,7 +315,7 @@ export default function ProfileScreen() {
           <Card style={{ marginTop: 14 }}>
             <SectionTitle>关于</SectionTitle>
             <Sub>
-              健身搭子 v1.4.0{'\n'}
+              健身搭子 v1.7.0{'\n'}
               本应用提供的训练与饮食建议仅供健康人群参考，不构成医疗建议。如有伤病、孕期或慢性疾病，请先咨询医生。食物营养数据为近似值。
             </Sub>
           </Card>

@@ -2,16 +2,28 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Animated, Button, Card, Chip, FadeInDown, Press, Scroll, SectionTitle, Segmented, Sheet, Sub, TextInputLine, stagger } from '../../src/components/ui';
-import { EMPHASIS, EQUIP_ZH, EXERCISES, EXERCISE_BY_ID, MUSCLE_ORDER, MUSCLE_ZH } from '../../src/data/exercises';
+import { Animated, Button, Card, Chip, FadeInDown, Press, Scroll, SectionTitle, Sheet, Sub, TextInputLine, stagger } from '../../src/components/ui';
+import { EQUIP_ZH, EXERCISES, EXERCISE_BY_ID, MUSCLE_ZH } from '../../src/data/exercises';
 import { addDays, fmtCN, todayKey, weekdayOf } from '../../src/lib/date';
-import { DURATION_OPTIONS, generateAIPlan, generateRulePlan, weekSchedule } from '../../src/lib/planner';
+import {
+  generateAIPlan, generateRulePlan, nextSessionAfter, SESSION_DEFS, sessionForWeekday, weekSchedule,
+} from '../../src/lib/planner';
 import { useProfileStore } from '../../src/store/profile';
 import { useScheduleStore } from '../../src/store/schedule';
 import { useSettingsStore } from '../../src/store/settings';
 import { lastPerformanceFor, useWorkoutsStore } from '../../src/store/workouts';
 import { C, FONT, R, TAPE } from '../../src/theme';
 import type { Exercise, GeneratedPlan, MuscleGroup, PlannedExercise } from '../../src/types';
+
+/** 生成入口的部位选项（比肌群更口语，一屏放得下） */
+const GEN_PARTS: { key: string; label: string; focus: MuscleGroup[] }[] = [
+  { key: 'chest', label: '胸', focus: ['chest'] },
+  { key: 'back', label: '背', focus: ['back'] },
+  { key: 'shoulders', label: '肩', focus: ['shoulders'] },
+  { key: 'arms', label: '手臂', focus: ['biceps', 'triceps'] },
+  { key: 'legs', label: '腿', focus: ['quads', 'hamstrings', 'glutes', 'calves'] },
+  { key: 'core', label: '核心', focus: ['core'] },
+];
 
 /** 自定义模式的编辑行（数字用字符串存，便于输入中间态） */
 interface CRow {
@@ -48,18 +60,15 @@ export default function PlansScreen() {
   const assign = useScheduleStore((s) => s.assign);
   const assignments = useScheduleStore((s) => s.assignments);
 
-  const [mode, setMode] = useState<'gen' | 'custom'>('gen');
-  const [muscle, setMuscle] = useState<MuscleGroup | null>(null);
-  const [emphasis, setEmphasis] = useState<string | undefined>(undefined);
-  const [duration, setDuration] = useState(45);
-  const [plan, setPlan] = useState<GeneratedPlan | null>(null);
   const [loading, setLoading] = useState(false);
+  // 生成结果的提示（AI 降级时显著提示）
+  const [genNote, setGenNote] = useState<{ text: string; warn?: boolean } | null>(null);
+  const [genPart, setGenPart] = useState<string | null>(null);
   const [savedToast, setSavedToast] = useState(false);
-  const [degraded, setDegraded] = useState(false); // AI 失败降级为规则引擎时显著提示
-  // 自定义编辑正对应哪份已保存的计划（回写而不是另存一份）
+  // 正在编辑哪份已保存的计划（回写而不是另存一份）
   const [editingMeta, setEditingMeta] = useState<{ id: string; createdAt: number } | null>(null);
 
-  // 自定义计划：分页编辑（一屏一个动作，左右滑动）
+  // 计划内容：分页编辑（一屏一个动作，左右滑动）
   const [cTitle, setCTitle] = useState('');
   const [cDate, setCDate] = useState<string | null>(todayKey()); // 排到哪天；null = 仅保存不排期
   const [cRows, setCRows] = useState<CRow[]>([newRow()]);
@@ -69,7 +78,7 @@ export default function PlansScreen() {
   // 卡片左右滑动手势的起点
   const swipeX = useRef<number | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [savedOpen, setSavedOpen] = useState(false); // 保存后弹出「我的计划」列表，可二次编辑
+  const [savedOpen, setSavedOpen] = useState(false); // 「我的计划」列表，可二次编辑
   const [pq, setPq] = useState('');
 
   // 从首页/手帐页「编辑」进入：把那天的排期课表载入编辑器（只执行一次）
@@ -89,9 +98,8 @@ export default function PlansScreen() {
       restSec: String(ex.restSec),
     })));
     setCTitle(a.plan.title);
-    setMode('custom');
     setSavedToast(false);
-    setDegraded(false);
+    setGenNote(null);
     setEditingMeta({ id: a.plan.id, createdAt: a.plan.createdAt });
     setCDate(d);
     setCPage(0);
@@ -99,47 +107,64 @@ export default function PlansScreen() {
 
   if (!profile) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
-  const pickMuscle = (m: MuscleGroup) => {
-    setMuscle(m === muscle ? null : m);
-    setEmphasis(undefined);
-    setPlan(null);
-  };
+  /* ---------- 一键生成：结果直接落进编辑区，和手改共用一套界面 ---------- */
 
-  const generate = async () => {
-    if (!muscle || !profile) return;
+  const generate = async (part: (typeof GEN_PARTS)[number] | null) => {
+    if (!profile) return;
+    setGenPart(part?.key ?? null);
     setLoading(true);
+    setGenNote(null);
     try {
-      const opts = {
-        focus: [muscle],
-        emphasis,
-        durationMin: duration,
-        profile,
-        seedKey: `${Date.now()}`,
-      };
+      const seed = `${Date.now()}`;
+      const opts = part
+        ? { focus: part.focus, durationMin: 45, profile, seedKey: seed, title: `${part.label} 训练 45分钟` }
+        : (() => {
+            const wd = weekdayOf(todayKey());
+            const type = sessionForWeekday(profile.daysPerWeek, wd) ?? nextSessionAfter(profile.daysPerWeek, wd);
+            return {
+              focus: SESSION_DEFS[type].focus,
+              durationMin: 60,
+              profile,
+              sessionType: type,
+              seedKey: seed,
+              title: SESSION_DEFS[type].label,
+            };
+          })();
       let p: GeneratedPlan;
-      let fellBack = false;
+      let warn = '';
       if (ai.enabled && ai.apiKey) {
         try {
           p = await generateAIPlan(opts, ai);
         } catch (e) {
           p = generateRulePlan(opts);
-          p.tips = `AI 暂时联系不上（${e instanceof Error ? e.message : '未知错误'}），这份是内置规则引擎生成的，可以先练。`;
-          fellBack = true;
+          warn = `AI 暂时联系不上（${e instanceof Error ? e.message : '未知错误'}），这份由内置规则引擎生成`;
         }
       } else {
         p = generateRulePlan(opts);
       }
-      setPlan(p);
-      setDegraded(fellBack);
-      setSavedToast(false);
+      setCRows(p.exercises.map((ex) => newRow({
+        exerciseId: ex.exerciseId,
+        name: ex.name,
+        sets: String(ex.sets),
+        reps: ex.reps,
+        restSec: String(ex.restSec),
+      })));
+      setCTitle(p.title);
       setEditingMeta(null);
+      setSavedToast(false);
+      setCView('list');
+      setCPage(0);
+      setGenNote({
+        text: `${warn ? '⚠︎ ' : '✦ '}${warn ? `${warn}。` : ''}已生成「${p.title}」· ${p.exercises.length} 个动作${p.tips ? `\n${p.tips}` : ''}`,
+        warn: !!warn,
+      });
     } finally {
       setLoading(false);
     }
   };
 
   const startPlan = (p: GeneratedPlan, date?: string | null) => {
-    // 同步记为训练日的安排（自定义模式带上所选日期，否则记今天）
+    // 同步记为训练日的安排（带上所选日期，否则记今天）
     assign(date ?? todayKey(), p);
     router.push({ pathname: '/session', params: { plan: encodeURIComponent(JSON.stringify(p)) } });
   };
@@ -151,7 +176,7 @@ export default function PlansScreen() {
     ]);
   };
 
-  /* ---------- 自定义计划 ---------- */
+  /* ---------- 动作编辑 ---------- */
 
   const updateRow = (key: string, patch: Partial<CRow>) => {
     setCRows((arr) => arr.map((r) => (r.key === key ? { ...r, ...patch } : r)));
@@ -237,7 +262,7 @@ export default function PlansScreen() {
     setCDate(assigned ? assigned.date : null);
     setSavedOpen(false);
     setSavedToast(false);
-    setDegraded(false);
+    setGenNote(null);
     setCPage(0);
   };
 
@@ -286,243 +311,209 @@ export default function PlansScreen() {
     setSavedOpen(true);
   };
 
-  /** 把生成好的计划转成自定义编辑（可改动作/组数/次数）；编辑已保存的计划时保存会覆盖原计划 */
-  const editAsCustom = (p: GeneratedPlan) => {
-    setCRows(p.exercises.map((ex) => newRow({
-      exerciseId: ex.exerciseId > 0 ? ex.exerciseId : 0,
-      name: ex.name,
-      sets: String(ex.sets),
-      reps: ex.reps,
-      restSec: String(ex.restSec),
-    })));
-    setCTitle(p.title);
-    setMode('custom');
-    setSavedToast(false);
-    setDegraded(false);
-    // 已保存过的计划（或生成结果尚未保存）都沿用其 id，保存即回写
-    setEditingMeta({ id: p.id, createdAt: p.createdAt });
-    setCDate(todayKey());
-    setCPage(0);
-  };
-
   const pickerList = useMemo(() => {
     const q = pq.trim();
     const list = q ? EXERCISES.filter((e) => e.name.includes(q)) : EXERCISES;
     return list.slice(0, 60);
   }, [pq]);
 
-  const emphOptions = muscle ? EMPHASIS[muscle] ?? [] : [];
   const sched = weekSchedule(profile.daysPerWeek);
 
   return (
     <SafeAreaView style={s.safe} edges={['top']}>
       <Scroll contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
         <Text style={s.title}>训练计划</Text>
-        {mode === 'custom' && editingMeta && cDate ? (
-          <Text style={s.editDateT}>{`正在编辑 ${fmtCN(cDate)} 的课表 · 保存后直接更新当天安排`}</Text>
-        ) : null}
         <Sub>
-          {mode === 'gen'
-            ? `按部位生成训练计划${ai.enabled && ai.apiKey ? ' · AI 已启用' : ' · 内置规则引擎（可在"我的"页配置 AI）'}`
-            : '自己填动作、组数、次数；也可以从动作库选，或把生成好的计划转过来改'}
+          {`点一下自动排一份，生成的动作随便改；也可以完全自己加。${ai.enabled && ai.apiKey ? 'AI 已启用' : '用内置规则引擎（"我的"页可配 AI）'}`}
         </Sub>
 
+        {/* 生成入口：一个按钮 + 想单独练某部位时的快捷方式 */}
         <View style={{ marginTop: 14 }}>
-          <Segmented
-            options={[{ value: 'gen', label: '智能生成' }, { value: 'custom', label: '自定义' }]}
-            value={mode}
-            onChange={(m) => { setMode(m); setSavedToast(false); }}
-          />
-        </View>
-
-        {mode === 'gen' ? (
-          <>
-            <SectionTitle>选择部位</SectionTitle>
-            <View style={s.grid}>
-              {MUSCLE_ORDER.map((m) => {
-                const on = m === muscle;
-                return (
-                  <Press
-                    key={m}
-                    style={[s.gridItem, on && s.gridItemOn]}
-                    onPress={() => pickMuscle(m)}
-                    haptic="medium"
-                  >
-                    <Text style={[s.gridT, on && s.gridTOn]}>{MUSCLE_ZH[m]}</Text>
-                    {EMPHASIS[m] ? <Sub style={{ fontSize: 10, color: on ? C.markerInk : C.sub }}>{EMPHASIS[m].join('/')}</Sub> : null}
-                  </Press>
-                );
-              })}
-            </View>
-
-            {muscle && emphOptions.length > 0 && (
-              <View style={{ marginTop: 14 }}>
-                <SectionTitle>侧重（可选）</SectionTitle>
-                <View style={s.wrap}>
-                  <Chip label="整体" selected={!emphasis} onPress={() => setEmphasis(undefined)} />
-                  {emphOptions.map((e) => (
-                    <Chip key={e} label={e} selected={emphasis === e} onPress={() => setEmphasis(e)} />
+          <Card style={s.genCard} taped={TAPE.blue}>
+            {loading ? (
+              <View style={s.loadingBox}>
+                <ActivityIndicator color={C.accent} size="large" />
+                <Sub style={{ marginTop: 10 }}>{ai.enabled && ai.apiKey ? 'AI 正在编排…' : '正在编排…'}</Sub>
+              </View>
+            ) : (
+              <>
+                <Button title="⚡ 一键智能生成" onPress={() => { void generate(null); }} />
+                <Sub style={{ marginTop: 8 }}>
+                  {`按你每周 ${profile.daysPerWeek} 天的安排，排好今天该练的`}
+                </Sub>
+                <View style={s.partWrap}>
+                  {GEN_PARTS.map((p) => (
+                    <Chip
+                      key={p.key}
+                      label={p.label}
+                      selected={genPart === p.key}
+                      onPress={() => { void generate(p); }}
+                    />
                   ))}
                 </View>
-              </View>
+                <Sub style={{ fontSize: 11 }}>或点一个部位，只练那里（45 分钟）</Sub>
+              </>
             )}
+          </Card>
+        </View>
 
-            <View style={{ marginTop: 14 }}>
-              <SectionTitle>时长</SectionTitle>
-              <Segmented
-                options={DURATION_OPTIONS.map((d) => ({ value: d, label: `${d}分钟` }))}
-                value={duration}
-                onChange={setDuration}
-              />
-            </View>
+        {genNote ? (
+          <View style={[s.noteBox, genNote.warn && s.noteWarn]}>
+            <Text style={[s.noteT, genNote.warn && { color: C.danger, fontWeight: '700' }]}>{genNote.text}</Text>
+          </View>
+        ) : null}
 
-            <View style={{ marginTop: 18 }}>
-              {loading ? (
-                <View style={s.loadingBox}>
-                  <ActivityIndicator color={C.accent} size="large" />
-                  <Sub style={{ marginTop: 10 }}>AI 正在为你编排…</Sub>
-                </View>
-              ) : (
-                <Button title="生成计划" onPress={generate} disabled={!muscle} />
-              )}
-            </View>
+        {/* 计划信息 */}
+        <View style={{ marginTop: 14 }}>
+          <SectionTitle>计划名称（可选）</SectionTitle>
+          <TextInputLine value={cTitle} onChange={setCTitle} placeholder="如：胸 + 三头 强化" />
 
-            {plan && (
-              <Animated.View entering={stagger()}>
-                <Card style={s.result} taped={TAPE.blue}>
-                  <View style={s.resultHead}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.resultT}>{plan.title}</Text>
-                      <Sub>{`${plan.durationMin}分钟 · ${plan.exercises.length}个动作${plan.focus.length ? ` · ${plan.focus.map((m) => MUSCLE_ZH[m]).join('/')}` : ''}`}</Sub>
-                    </View>
-                    <View style={[s.srcBadge, plan.source === 'ai' && { borderColor: C.info }, plan.source === 'custom' && { borderColor: C.accent }]}>
-                      <Text style={[s.srcT, plan.source === 'ai' && { color: C.info }, plan.source === 'custom' && { color: C.accent }]}>{sourceLabel(plan.source)}</Text>
-                    </View>
-                  </View>
+          <View style={{ marginTop: 14 }}>
+            <SectionTitle right={<Sub>{cDate ? `将排到 ${fmtCN(cDate)}` : '仅保存，不排期'}</Sub>}>安排到哪天</SectionTitle>
+            <Scroll horizontal style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 8, paddingVertical: 2 }}>
+              <Chip label="仅保存" selected={cDate === null} onPress={() => setCDate(null)} />
+              {Array.from({ length: 14 }, (_, k) => addDays(todayKey(), k)).map((key) => {
+                const wd = weekdayOf(key);
+                const isTrainDay = sched.days.includes(wd);
+                const isOtherMonth = key.slice(0, 7) !== todayKey().slice(0, 7);
+                const label = key === todayKey()
+                  ? '今天'
+                  : key === addDays(todayKey(), 1)
+                    ? '明天'
+                    : Number(key.slice(8, 10)) === 1 || (isOtherMonth && Number(key.slice(8, 10)) <= 14)
+                      ? `${Number(key.slice(5, 7))}月${Number(key.slice(8, 10))}日`
+                      : `${Number(key.slice(8, 10))}日`;
+                return (
+                  <Chip
+                    key={key}
+                    label={isTrainDay ? `${label}·练` : label}
+                    selected={cDate === key}
+                    onPress={() => setCDate(key)}
+                  />
+                );
+              })}
+            </Scroll>
+          </View>
+        </View>
 
-                  {plan.tips ? (
-                    <View style={[s.tipsBox, degraded && s.tipsBoxWarn]}>
-                      <Text style={[s.tipsT, degraded && { color: C.danger, fontWeight: '700' }]}>
-                        {`${degraded ? '⚠︎ ' : '✎ '}${plan.tips}`}
-                      </Text>
-                    </View>
-                  ) : null}
+        {/* 动作：整理（列表通览）为主，逐个编辑（大卡片）为辅 */}
+        <View style={{ marginTop: 14 }}>
+          <SectionTitle>动作</SectionTitle>
+          <View style={s.cViewRow}>
+            <Sub style={{ flex: 1 }}>{`${cRows.filter((r) => r.name.trim()).length} 个动作 · 约 ${cDuration} 分钟`}</Sub>
+            <Press style={[s.cViewBtn, cView === 'list' && s.cViewBtnOn]} onPress={() => setCView('list')}>
+              <Text style={[s.cViewT, cView === 'list' && s.cViewTOn]}>整理</Text>
+            </Press>
+            <Press style={[s.cViewBtn, cView === 'card' && s.cViewBtnOn]} onPress={() => setCView('card')}>
+              <Text style={[s.cViewT, cView === 'card' && s.cViewTOn]}>逐个编辑</Text>
+            </Press>
+          </View>
 
-                  <View style={s.exList}>
-                    {plan.exercises.map((ex, i) => {
-                      const meta = EXERCISE_BY_ID.get(ex.exerciseId);
-                      const last = lastPerformanceFor(logs, ex.exerciseId, ex.name);
-                      return (
-                        <View key={`${ex.exerciseId}-${i}`} style={s.exRow}>
-                          <View style={s.exIdx}>
-                            <Text style={s.exIdxT}>{i + 1}</Text>
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={s.exName}>{ex.name}</Text>
-                            <Sub>
-                              {`${ex.sets}组 × ${ex.reps} · 休息${ex.restSec}s${meta ? ` · ${EQUIP_ZH[meta.equipment]}` : ''}`}
-                              {last ? ` · 上次 ${last.weight}kg×${last.reps}` : ''}
-                            </Sub>
-                            {ex.note ? <Sub style={{ marginTop: 2 }}>{ex.note}</Sub> : null}
-                          </View>
-                        </View>
-                      );
-                    })}
-                  </View>
-
-                  <View style={s.btnRow}>
-                    <Button title="开始训练" onPress={() => startPlan(plan)} />
-                    <Button title="编辑" kind="ghost" small onPress={() => editAsCustom(plan)} />
-                    <Button
-                      title={savedToast ? '已保存 ✓' : '保存'}
-                      kind="ghost"
-                      small
-                      onPress={() => { savePlan(plan); setSavedToast(true); }}
-                    />
-                  </View>
-                </Card>
-              </Animated.View>
-            )}
-          </>
-        ) : (
-          <>
-            <SectionTitle>计划名称（可选）</SectionTitle>
-            <TextInputLine value={cTitle} onChange={setCTitle} placeholder="如：胸 + 三头 强化" />
-
-            {/* 安排到哪天：当天或提前排期，也可仅保存 */}
-            <View style={{ marginTop: 14 }}>
-              <SectionTitle right={<Sub>{cDate ? `将排到 ${fmtCN(cDate)}` : '仅保存，不排期'}</Sub>}>安排到哪天</SectionTitle>
-              <Scroll horizontal style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 8, paddingVertical: 2 }}>
-                <Chip label="仅保存" selected={cDate === null} onPress={() => setCDate(null)} />
-                {Array.from({ length: 14 }, (_, k) => addDays(todayKey(), k)).map((key) => {
-                  const wd = weekdayOf(key);
-                  const isTrainDay = sched.days.includes(wd);
-                  const isOtherMonth = key.slice(0, 7) !== todayKey().slice(0, 7);
-                  const label = key === todayKey()
-                    ? '今天'
-                    : key === addDays(todayKey(), 1)
-                      ? '明天'
-                      : Number(key.slice(8, 10)) === 1 || (isOtherMonth && Number(key.slice(8, 10)) <= 14)
-                        ? `${Number(key.slice(5, 7))}月${Number(key.slice(8, 10))}日`
-                        : `${Number(key.slice(8, 10))}日`;
-                  return (
-                    <Chip
-                      key={key}
-                      label={isTrainDay ? `${label}·练` : label}
-                      selected={cDate === key}
-                      onPress={() => setCDate(key)}
-                    />
-                  );
-                })}
-              </Scroll>
-            </View>
-
-            {/* 动作：整理（列表通览）为主，逐个编辑（大卡片）为辅 */}
-            <View style={{ marginTop: 14 }}>
-              <SectionTitle>动作</SectionTitle>
-              <View style={s.cViewRow}>
-                <Sub style={{ flex: 1 }}>{`${cRows.filter((r) => r.name.trim()).length} 个动作 · 约 ${cDuration} 分钟`}</Sub>
-                <Press style={[s.cViewBtn, cView === 'list' && s.cViewBtnOn]} onPress={() => setCView('list')}>
-                  <Text style={[s.cViewT, cView === 'list' && s.cViewTOn]}>整理</Text>
-                </Press>
-                <Press style={[s.cViewBtn, cView === 'card' && s.cViewBtnOn]} onPress={() => setCView('card')}>
-                  <Text style={[s.cViewT, cView === 'card' && s.cViewTOn]}>逐个编辑</Text>
-                </Press>
-              </View>
-
-              {cView === 'list' ? (
-                <Animated.View entering={FadeInDown.duration(180)} key="clist">
-                  {/* 整理模式：紧凑列表，通览全部动作，可排序/删除，点行进卡片细调 */}
-                  <Card style={s.cListCard}>
-                    {cRows.map((r, i) => (
-                      <View key={r.key} style={s.cListRow}>
-                        <Press style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => { setCPage(i); setCView('card'); }}>
-                          <View style={[s.cIdx, r.exerciseId > 0 && s.cIdxLib]}>
-                            <Text style={s.cIdxT}>{i + 1}</Text>
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={s.cListName} numberOfLines={1}>{r.name.trim() || '未命名动作'}</Text>
-                            <Sub style={{ fontSize: 11 }}>{`${r.sets || 3}×${r.reps || '10'} · 休息${r.restSec || 90}s`}</Sub>
-                          </View>
-                          <Text style={s.cListEdit}>编辑 ›</Text>
-                        </Press>
-                        <Press hitSlop={6} disabled={i === 0} onPress={() => moveRow(i, -1)}>
-                          <Text style={[s.cListOp, i === 0 && { color: C.lineStrong }]}>↑</Text>
-                        </Press>
-                        <Press hitSlop={6} disabled={i === cRows.length - 1} onPress={() => moveRow(i, 1)}>
-                          <Text style={[s.cListOp, i === cRows.length - 1 && { color: C.lineStrong }]}>↓</Text>
-                        </Press>
-                        {cRows.length > 1 ? (
-                          <Press hitSlop={6} onPress={() => delCRow(i)}>
-                            <Text style={s.cListDel}>✕</Text>
-                          </Press>
-                        ) : null}
+          {cView === 'list' ? (
+            <Animated.View entering={FadeInDown.duration(180)} key="clist">
+              {/* 整理模式：紧凑列表，通览全部动作，可排序/删除，点行进卡片细调 */}
+              <Card style={s.cListCard}>
+                {cRows.map((r, i) => (
+                  <View key={r.key} style={s.cListRow}>
+                    <Press style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 }} onPress={() => { setCPage(i); setCView('card'); }}>
+                      <View style={[s.cIdx, r.exerciseId > 0 && s.cIdxLib]}>
+                        <Text style={s.cIdxT}>{i + 1}</Text>
                       </View>
-                    ))}
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.cListName} numberOfLines={1}>{r.name.trim() || '未命名动作'}</Text>
+                        <Sub style={{ fontSize: 11 }}>{`${r.sets || 3}×${r.reps || '10'} · 休息${r.restSec || 90}s`}</Sub>
+                      </View>
+                      <Text style={s.cListEdit}>编辑 ›</Text>
+                    </Press>
+                    <Press hitSlop={6} disabled={i === 0} onPress={() => moveRow(i, -1)}>
+                      <Text style={[s.cListOp, i === 0 && { color: C.lineStrong }]}>↑</Text>
+                    </Press>
+                    <Press hitSlop={6} disabled={i === cRows.length - 1} onPress={() => moveRow(i, 1)}>
+                      <Text style={[s.cListOp, i === cRows.length - 1 && { color: C.lineStrong }]}>↓</Text>
+                    </Press>
+                    {cRows.length > 1 ? (
+                      <Press hitSlop={6} onPress={() => delCRow(i)}>
+                        <Text style={s.cListDel}>✕</Text>
+                      </Press>
+                    ) : null}
+                  </View>
+                ))}
+
+                {historyMoves.length > 0 ? (
+                  <View style={{ marginTop: 10 }}>
+                    <Sub style={{ fontSize: 11, marginBottom: 6 }}>最近练过（点一下加进计划）</Sub>
+                    <Scroll horizontal style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 8, paddingVertical: 2 }}>
+                      {historyMoves.map((h) => (
+                        <Chip key={h.name} label={`${h.name} ${h.sets}×${h.reps}`} selected={false} onPress={() => tapHistory(h)} />
+                      ))}
+                    </Scroll>
+                  </View>
+                ) : null}
+
+                <View style={s.cActions}>
+                  <Button title="＋ 添加动作" kind="ghost" small onPress={() => createNextRow()} />
+                  <Button title="从动作库选" kind="ghost" small onPress={() => { setPq(''); setPickerOpen(true); }} />
+                </View>
+              </Card>
+            </Animated.View>
+          ) : (
+            <Animated.View
+              key={cRows[cPage]?.key ?? 'empty'}
+              entering={FadeInDown.duration(180)}
+              onTouchStart={(e) => { swipeX.current = e.nativeEvent.touches[0]?.pageX ?? null; }}
+              onTouchEnd={(e) => {
+                const x0 = swipeX.current;
+                const x1 = e.nativeEvent.changedTouches[0]?.pageX ?? null;
+                swipeX.current = null;
+                if (x0 == null || x1 == null) return;
+                const dx = x1 - x0;
+                if (dx < -44) goCPage(cPage + 1);
+                else if (dx > 44) goCPage(cPage - 1);
+              }}
+            >
+              {(() => {
+                const r = cRows[cPage];
+                const i = Math.min(cPage, cRows.length - 1);
+                if (!r) return null;
+                return (
+                  <Card style={s.cCard}>
+                    <View style={s.cPageHead}>
+                      <View style={[s.cIdx, r.exerciseId > 0 && s.cIdxLib]}>
+                        <Text style={s.cIdxT}>{i + 1}</Text>
+                      </View>
+                      <Text style={s.cPageT}>{`动作 ${i + 1}/${cRows.length}`}</Text>
+                      {cRows.length > 1 ? (
+                        <Pressable hitSlop={8} style={s.cDelWrap} onPress={() => delCRow(i)}>
+                          <Text style={s.cDel}>删除</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+
+                    <View style={s.cLibRow}>
+                      <Button title="从动作库选" kind="ghost" small onPress={() => { setPq(''); setPickerOpen(true); }} />
+                    </View>
+                    <TextInput
+                      style={s.cName}
+                      value={r.name}
+                      onChangeText={(v) => {
+                        const name = v.replace(/[^\u4e00-\u9fa5A-Za-z0-9()（）\s-]/g, '');
+                        // 名称仍与库中动作一致时保留库关联（用于器械显示与历史成绩）
+                        const libName = r.exerciseId > 0 ? EXERCISE_BY_ID.get(r.exerciseId)?.name : undefined;
+                        updateRow(r.key, { name, exerciseId: libName && name === libName ? r.exerciseId : 0 });
+                      }}
+                      placeholder="动作名称（如：卧推 / 深蹲）"
+                      placeholderTextColor={C.faint}
+                      maxLength={24}
+                    />
+                    <View style={s.cRowNums}>
+                      <NumBox label="组数" value={r.sets} onChange={(v) => updateRow(r.key, { sets: v.replace(/\D/g, '') })} />
+                      <NumBox label="次数" value={r.reps} onChange={(v) => updateRow(r.key, { reps: v.replace(/[^\d\-~+一-龥]/g, '') })} />
+                      <NumBox label="休息" value={r.restSec} onChange={(v) => updateRow(r.key, { restSec: v.replace(/\D/g, '') })} suffix="s" />
+                    </View>
 
                     {historyMoves.length > 0 ? (
-                      <View style={{ marginTop: 10 }}>
-                        <Sub style={{ fontSize: 11, marginBottom: 6 }}>最近练过（点一下加进计划）</Sub>
+                      <View style={{ marginTop: 12 }}>
+                        <Sub style={{ fontSize: 11, marginBottom: 6 }}>最近练过（点一下填入）</Sub>
                         <Scroll horizontal style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 8, paddingVertical: 2 }}>
                           {historyMoves.map((h) => (
                             <Chip key={h.name} label={`${h.name} ${h.sets}×${h.reps}`} selected={false} onPress={() => tapHistory(h)} />
@@ -531,131 +522,57 @@ export default function PlansScreen() {
                       </View>
                     ) : null}
 
-                    <View style={s.cActions}>
-                      <Button title="＋ 添加动作" kind="ghost" small onPress={() => createNextRow()} />
-                      <Button title="从动作库选" kind="ghost" small onPress={() => { setPq(''); setPickerOpen(true); }} />
+                    <View style={s.cNavRow}>
+                      <Press disabled={i === 0} onPress={() => goCPage(i - 1)} hitSlop={4}>
+                        <Text style={[s.cNavT, i === 0 && { color: C.faint }]}>‹ 上一个</Text>
+                      </Press>
+                      <View style={s.cDots}>
+                        {cRows.map((_, k) => (
+                          <View key={k} style={[s.cDot, k === i && s.cDotOn]} />
+                        ))}
+                      </View>
+                      <Press disabled={i === cRows.length - 1} onPress={() => goCPage(i + 1)} hitSlop={4}>
+                        <Text style={[s.cNavT, i === cRows.length - 1 && { color: C.faint }]}>下一个 ›</Text>
+                      </Press>
                     </View>
+
+                    {i === cRows.length - 1 ? (
+                      <View style={{ marginTop: 14 }}>
+                        <Button title="＋ 创建下一个动作" onPress={() => createNextRow()} />
+                      </View>
+                    ) : null}
                   </Card>
-                </Animated.View>
-              ) : (
-              <Animated.View
-                key={cRows[cPage]?.key ?? 'empty'}
-                entering={FadeInDown.duration(180)}
-                onTouchStart={(e) => { swipeX.current = e.nativeEvent.touches[0]?.pageX ?? null; }}
-                onTouchEnd={(e) => {
-                  const x0 = swipeX.current;
-                  const x1 = e.nativeEvent.changedTouches[0]?.pageX ?? null;
-                  swipeX.current = null;
-                  if (x0 == null || x1 == null) return;
-                  const dx = x1 - x0;
-                  if (dx < -44) goCPage(cPage + 1);
-                  else if (dx > 44) goCPage(cPage - 1);
-                }}
-              >
-                {(() => {
-                  const r = cRows[cPage];
-                  const i = Math.min(cPage, cRows.length - 1);
-                  if (!r) return null;
-                  return (
-                    <Card style={s.cCard}>
-                      <View style={s.cPageHead}>
-                        <View style={[s.cIdx, r.exerciseId > 0 && s.cIdxLib]}>
-                          <Text style={s.cIdxT}>{i + 1}</Text>
-                        </View>
-                        <Text style={s.cPageT}>{`动作 ${i + 1}/${cRows.length}`}</Text>
-                        {cRows.length > 1 ? (
-                          <Pressable hitSlop={8} style={s.cDelWrap} onPress={() => delCRow(i)}>
-                            <Text style={s.cDel}>删除</Text>
-                          </Pressable>
-                        ) : null}
-                      </View>
+                );
+              })()}
+            </Animated.View>
+          )}
+        </View>
 
-                      <View style={s.cLibRow}>
-                        <Button title="从动作库选" kind="ghost" small onPress={() => { setPq(''); setPickerOpen(true); }} />
-                      </View>
-                      <TextInput
-                        style={s.cName}
-                        value={r.name}
-                        onChangeText={(v) => {
-                          const name = v.replace(/[^\u4e00-\u9fa5A-Za-z0-9()（）\s-]/g, '');
-                          // 名称仍与库中动作一致时保留库关联（用于器械显示与历史成绩）
-                          const libName = r.exerciseId > 0 ? EXERCISE_BY_ID.get(r.exerciseId)?.name : undefined;
-                          updateRow(r.key, { name, exerciseId: libName && name === libName ? r.exerciseId : 0 });
-                        }}
-                        placeholder="动作名称（如：卧推 / 深蹲）"
-                        placeholderTextColor={C.faint}
-                        maxLength={24}
-                      />
-                      <View style={s.cRowNums}>
-                        <NumBox label="组数" value={r.sets} onChange={(v) => updateRow(r.key, { sets: v.replace(/\D/g, '') })} />
-                        <NumBox label="次数" value={r.reps} onChange={(v) => updateRow(r.key, { reps: v.replace(/[^\d\-~+一-龥]/g, '') })} />
-                        <NumBox label="休息" value={r.restSec} onChange={(v) => updateRow(r.key, { restSec: v.replace(/\D/g, '') })} suffix="s" />
-                      </View>
-
-                      {historyMoves.length > 0 ? (
-                        <View style={{ marginTop: 12 }}>
-                          <Sub style={{ fontSize: 11, marginBottom: 6 }}>最近练过（点一下填入）</Sub>
-                          <Scroll horizontal style={{ flexGrow: 0 }} contentContainerStyle={{ gap: 8, paddingVertical: 2 }}>
-                            {historyMoves.map((h) => (
-                              <Chip key={h.name} label={`${h.name} ${h.sets}×${h.reps}`} selected={false} onPress={() => tapHistory(h)} />
-                            ))}
-                          </Scroll>
-                        </View>
-                      ) : null}
-
-                      <View style={s.cNavRow}>
-                        <Press disabled={i === 0} onPress={() => goCPage(i - 1)} hitSlop={4}>
-                          <Text style={[s.cNavT, i === 0 && { color: C.faint }]}>‹ 上一个</Text>
-                        </Press>
-                        <View style={s.cDots}>
-                          {cRows.map((_, k) => (
-                            <View key={k} style={[s.cDot, k === i && s.cDotOn]} />
-                          ))}
-                        </View>
-                        <Press disabled={i === cRows.length - 1} onPress={() => goCPage(i + 1)} hitSlop={4}>
-                          <Text style={[s.cNavT, i === cRows.length - 1 && { color: C.faint }]}>下一个 ›</Text>
-                        </Press>
-                      </View>
-
-                      {i === cRows.length - 1 ? (
-                        <View style={{ marginTop: 14 }}>
-                          <Button title="＋ 创建下一个动作" onPress={() => createNextRow()} />
-                        </View>
-                      ) : null}
-                    </Card>
-                  );
-                })()}
-              </Animated.View>
-              )}
-            </View>
-
-            <View style={{ marginTop: 18 }}>
-              <Button title="开始训练" onPress={startCustom} disabled={!customReady} />
-            </View>
-            <View style={s.cActions}>
-              <Button
-                title={
-                  savedToast ? '已保存 ✓'
-                    : editingMeta && cDate ? `更新 ${fmtCN(cDate)} 课表`
-                    : cDate ? `保存并排到 ${fmtCN(cDate)}`
-                    : editingMeta ? '更新这份计划'
-                    : '保存到我的计划'
-                }
-                kind="ghost"
-                small
-                onPress={saveCustom}
-                disabled={!customReady}
-              />
-              <Button
-                title={`我的计划（${savedPlans.length}）`}
-                kind="ghost"
-                small
-                onPress={() => setSavedOpen(true)}
-              />
-            </View>
-            {!customReady ? <Sub style={{ marginTop: 10 }}>至少填写一个动作名称才能开始训练。</Sub> : null}
-          </>
-        )}
+        <View style={{ marginTop: 18 }}>
+          <Button title="开始训练" onPress={startCustom} disabled={!customReady} />
+        </View>
+        <View style={s.cActions}>
+          <Button
+            title={
+              savedToast ? '已保存 ✓'
+                : editingMeta && cDate ? `更新 ${fmtCN(cDate)} 课表`
+                : cDate ? `保存并排到 ${fmtCN(cDate)}`
+                : editingMeta ? '更新这份计划'
+                : '保存到我的计划'
+            }
+            kind="ghost"
+            small
+            onPress={saveCustom}
+            disabled={!customReady}
+          />
+          <Button
+            title={`我的计划（${savedPlans.length}）`}
+            kind="ghost"
+            small
+            onPress={() => setSavedOpen(true)}
+          />
+        </View>
+        {!customReady ? <Sub style={{ marginTop: 10 }}>至少填写一个动作名称才能开始训练。</Sub> : null}
       </Scroll>
 
       {/* 动作库选择 */}
@@ -684,7 +601,7 @@ export default function PlansScreen() {
         </View>
       </Sheet>
 
-      {/* 我的计划：保存后弹出，点选进行二次编辑 */}
+      {/* 我的计划：点选进行二次编辑 */}
       <Sheet visible={savedOpen} onClose={() => setSavedOpen(false)} title="我的计划（点选进行二次编辑）">
         {savedPlans.length === 0 ? (
           <Sub style={{ padding: 16, textAlign: 'center' }}>还没有保存过计划，编辑好后点「保存」就会出现在这里</Sub>
@@ -740,45 +657,17 @@ const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: C.bg },
   body: { padding: 16, paddingBottom: 64 },
   title: { color: C.text, fontSize: 24, fontWeight: '800', marginTop: 8, letterSpacing: 0.5 },
-  editDateT: { color: C.accent, fontSize: 13, fontWeight: '700', marginBottom: 4 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  gridItem: {
-    width: '30.5%', backgroundColor: C.card, borderWidth: 1.5, borderColor: C.inkAlpha,
-    borderRadius: R.md, paddingVertical: 14, alignItems: 'center', gap: 3,
+  genCard: { paddingVertical: 16 },
+  loadingBox: { alignItems: 'center', paddingVertical: 10 },
+  partWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 14, marginBottom: 8 },
+  noteBox: {
+    marginTop: 12, backgroundColor: '#EAF1E4', borderRadius: R.sm, borderWidth: 1.5,
+    borderColor: 'rgba(62,142,78,0.3)', padding: 12,
   },
-  gridItemOn: { backgroundColor: C.marker, borderColor: 'rgba(107,90,16,0.4)' },
-  gridT: { color: C.text, fontSize: 15, fontWeight: '700' },
-  gridTOn: { color: C.markerInk },
-  wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  loadingBox: {
-    height: 120, borderRadius: R.lg, borderWidth: 1.5, borderColor: C.inkAlpha, borderStyle: 'dashed',
-    backgroundColor: C.card, alignItems: 'center', justifyContent: 'center',
-  },
-  result: { marginTop: 18 },
-  resultHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
-  resultT: { color: C.text, fontSize: 19, fontWeight: '800', marginBottom: 3 },
-  srcBadge: {
-    backgroundColor: C.inset, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4,
-    borderWidth: 1.5, borderColor: C.good,
-  },
-  srcT: { color: C.good, fontSize: 11, fontWeight: '800' },
-  tipsBox: {
-    backgroundColor: C.inset, borderRadius: R.sm, borderWidth: 1.5, borderColor: C.inkAlphaSoft,
-    padding: 12, marginTop: 12,
-  },
-  tipsBoxWarn: { backgroundColor: '#F6DBD5', borderColor: 'rgba(192,59,46,0.35)' },
-  tipsT: { color: C.sub, fontSize: 12, lineHeight: 18 },
-  exList: { marginTop: 6 },
-  exRow: { flexDirection: 'row', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.lineStrong, borderStyle: 'dashed' },
-  exIdx: {
-    width: 26, height: 26, borderRadius: 999, backgroundColor: C.inset, borderWidth: 1.5, borderColor: C.inkAlphaSoft,
-    alignItems: 'center', justifyContent: 'center', marginTop: 2,
-  },
-  exIdxT: { color: C.accent, fontSize: 12, fontWeight: '900', fontFamily: FONT.extra },
-  exName: { color: C.text, fontSize: 15, fontWeight: '700', marginBottom: 3 },
-  btnRow: { flexDirection: 'row', gap: 10, marginTop: 16, alignItems: 'center' },
+  noteWarn: { backgroundColor: '#F6DBD5', borderColor: 'rgba(192,59,46,0.35)' },
+  noteT: { color: C.text, fontSize: 12, lineHeight: 18, fontFamily: FONT.semi },
 
-  /* 自定义模式：分页编辑 */
+  /* 动作编辑 */
   cViewRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 },
   cViewBtn: {
     paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,

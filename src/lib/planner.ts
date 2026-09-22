@@ -183,6 +183,40 @@ export function generateSessionPlan(sessionType: SessionType, profile: Profile, 
   return generateRulePlan({ focus: def.focus, durationMin, profile, sessionType, seedKey, title: def.label });
 }
 
+// ---------- 5 分钟保底训练 ----------
+
+/** 没时间的日子保住节奏：纯徒手一轮，随时开练（找不到动作就跳过，容错库数据变更） */
+export function buildQuickPlan(): GeneratedPlan {
+  const rows: [name: string, sets: number, reps: string, restSec: number][] = [
+    ['开合跳', 1, '30秒', 20],
+    ['徒手深蹲', 2, '15', 40],
+    ['俯卧撑', 2, '10-12', 45],
+    ['自重臀桥', 1, '15', 30],
+    ['登山跑', 1, '30秒', 20],
+    ['平板支撑', 1, '40秒', 0],
+  ];
+  const exercises: PlannedExercise[] = rows.flatMap(([name, sets, reps, restSec]) => {
+    const ex = EXERCISES.find((e) => e.name === name);
+    if (!ex) return [];
+    return [{ exerciseId: ex.id, name: ex.name, sets, reps, restSec, timed: ex.timed || undefined }];
+  });
+  const focus = [...new Set(exercises.flatMap((pe) => {
+    const ex = EXERCISE_BY_ID.get(pe.exerciseId);
+    return ex ? [ex.primary] : [];
+  }))];
+  return {
+    id: `quick-${Date.now()}`,
+    title: '5 分钟保底训练',
+    sessionType: 'custom',
+    focus,
+    durationMin: 5,
+    source: 'rule',
+    tips: '没时间的日子就来一轮：动作间少休息，练完该干嘛干嘛。保底训练的意义是「今天也练了」。',
+    exercises,
+    createdAt: Date.now(),
+  };
+}
+
 // ---------- AI 生成 ----------
 
 export async function generateAIPlan(o: PlanOptions, ai: AISettings): Promise<GeneratedPlan> {

@@ -6,6 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Animated, Button, Card, FadeInDown, Press, Scroll, Stamp, Sub, haptic } from '../src/components/ui';
 import { EQUIP_ZH, EXERCISE_BY_ID } from '../src/data/exercises';
 import { dateKey, fmtDur, todayKey } from '../src/lib/date';
+import { say, stopSay } from '../src/lib/say';
 import { playSound } from '../src/lib/sound';
 import { useSessionDraftStore, type DraftSetRow as SetRow } from '../src/store/sessionDraft';
 import { useSettingsStore } from '../src/store/settings';
@@ -79,6 +80,7 @@ export default function SessionScreen() {
   const saveDraft = useSessionDraftStore((s) => s.save);
   const clearDraft = useSessionDraftStore((s) => s.clear);
   const soundOn = useSettingsStore((s) => s.sound);
+  const voiceOn = useSettingsStore((s) => s.voice);
 
   // 恢复今天的草稿：无 plan 参数时（首页「继续训练」），或再次进入同一份计划时（避免覆盖进行中的进度）
   const paramsPlan = useMemo(() => parsePlan(typeof params.plan === 'string' ? params.plan : undefined), [params.plan]);
@@ -137,6 +139,9 @@ export default function SessionScreen() {
     return () => clearInterval(t);
   }, []);
 
+  // 退出训练页时停掉未播完的语音
+  useEffect(() => () => stopSay(), []);
+
   // 组记录实时落盘：中途退出 / App 被杀后可从首页恢复（至少完成一组才存，随手看看不会留下草稿）
   useEffect(() => {
     if (!plan) return;
@@ -159,6 +164,17 @@ export default function SessionScreen() {
     }, 1000);
     return () => clearInterval(t);
   }, [rest !== null, soundOn]);
+
+  // 语音搭子：剩 30/10 秒播报，结束时语音收尾（提示音之外的「动嘴」版）
+  useEffect(() => {
+    if (!rest || !voiceOn || rest.remain <= 0) return;
+    if (rest.remain === 30 && rest.total > 40) say('还有三十秒');
+    else if (rest.remain === 10 && rest.total > 15) say('还有十秒');
+  }, [rest?.remain, rest?.total, voiceOn]);
+
+  useEffect(() => {
+    if (rest && voiceOn && rest.remain === 0) say('休息结束，开始下一组');
+  }, [rest?.remain, voiceOn]);
 
   // 最后 3 秒逐秒轻震 + 轻音，倒计时结束的「叮」在上面触发
   useEffect(() => {
@@ -183,10 +199,12 @@ export default function SessionScreen() {
 
   const totalDone = sets.reduce((a, ex) => a + ex.filter((r) => r.done).length, 0);
   const totalSets = sets.reduce((a, ex) => a + ex.length, 0);
-  const volume = sets.reduce(
-    (a, ex) => a + ex.reduce((b, r) => (r.done ? b + (Number(r.weight) || 0) * (Number(r.reps) || 0) : b), 0),
-    0,
-  );
+  // 计时动作（秒数当次数）不计入容量：weight×秒数没有训练学意义
+  const volume = sets.reduce((a, ex, ei) => (
+    isTimed(plan.exercises[ei])
+      ? a
+      : a + ex.reduce((b, r) => (r.done ? b + (Number(r.weight) || 0) * (Number(r.reps) || 0) : b), 0)
+  ), 0);
 
   const toggleSet = (ei: number, si: number) => {
     const willDone = !sets[ei][si].done;
@@ -231,6 +249,7 @@ export default function SessionScreen() {
       .map((ex, ei) => ({
         exerciseId: ex.exerciseId,
         name: ex.name,
+        timed: isTimed(ex) || undefined,
         sets: sets[ei].filter((r) => r.done).map((r) => ({ weight: Number(r.weight) || 0, reps: Number(r.reps) || 0 })),
       }))
       .filter((e) => e.sets.length > 0);
@@ -246,6 +265,7 @@ export default function SessionScreen() {
     addLog(log);
     clearDraft();
     haptic('success');
+    if (voiceOn) say('训练完成，今天也辛苦了');
     router.replace({ pathname: '/summary', params: { id: log.id } });
   };
 
@@ -353,16 +373,22 @@ export default function SessionScreen() {
                   {`${ex.sets}组 × ${ex.reps} · 休息${ex.restSec}s${meta ? ` · ${EQUIP_ZH[meta.equipment]}` : ''}`}
                 </Sub>
                 {lastSets ? (
-                  <Sub>{`上次 ${lastSets.sets.map((st) => (st.weight > 0 ? `${st.weight}×${st.reps}` : `${st.reps}次`)).join(' · ')}`}</Sub>
+                  <Sub>{`上次 ${lastSets.sets.map((st) => (st.weight > 0 ? `${st.weight}kg×${st.reps}${timed ? '秒' : ''}` : `${st.reps}${timed ? '秒' : '次'}`)).join(' · ')}`}</Sub>
                 ) : null}
                 {ex.note ? <Sub style={{ marginTop: 4 }}>{ex.note}</Sub> : null}
 
                 <View style={s.bigRow}>
                   {timed ? (
-                    <View style={s.bigField}>
-                      <Text style={s.bigLabel}>秒数</Text>
-                      <StepInput value={row.reps} onChange={(v) => editSet(ei, si, 'reps', v)} step={5} placeholder="0" />
-                    </View>
+                    <>
+                      <View style={s.bigField}>
+                        <Text style={s.bigLabel}>秒数</Text>
+                        <StepInput value={row.reps} onChange={(v) => editSet(ei, si, 'reps', v)} step={5} placeholder="0" />
+                      </View>
+                      <View style={s.bigField}>
+                        <Text style={s.bigLabel}>负重 kg</Text>
+                        <StepInput value={row.weight} onChange={(v) => editSet(ei, si, 'weight', v)} step={2.5} placeholder="可选" />
+                      </View>
+                    </>
                   ) : (
                     <>
                       <View style={s.bigField}>

@@ -3,6 +3,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Animated, Button, Card, Confetti, Scroll, Stamp, Stat, Sub, stagger, useCountUp } from '../src/components/ui';
 import { fmtDur } from '../src/lib/date';
+import { e1rm, volumeOfLog } from '../src/lib/review';
 import { useWorkoutsStore } from '../src/store/workouts';
 import { C, FONT, R } from '../src/theme';
 
@@ -24,20 +25,17 @@ export default function SummaryScreen() {
   }
 
   const totalSets = log.exercises.reduce((a, e) => a + e.sets.length, 0);
-  const volume = Math.round(log.exercises.reduce((a, e) => a + e.sets.reduce((b, s) => b + s.weight * s.reps, 0), 0));
-
-  // Epley 估算 1RM：重量×次数综合换算，轻重量多次数的好成绩也能被认出来
-  const e1rm = (w: number, r: number) => (w > 0 && r > 0 ? Math.round(w * (1 + r / 30)) : 0);
+  const volume = volumeOfLog(log);
 
   // 新纪录 / 新动作检测：对比本次之前同动作的历史表现
-  // 动作库动作按 ID 归组；自定义动作（ID <= 0）按名称归组
+  // 动作库动作按 ID 归组；自定义动作（ID <= 0）按名称归组；计时动作不参与 1RM 估算
   const keyOf = (e: { exerciseId: number; name: string }) => (e.exerciseId > 0 ? `id:${e.exerciseId}` : `name:${e.name}`);
   const priorLogs = logs.filter((l) => l.id !== log.id);
   const prExercises = log.exercises
-    .filter((e) => e.sets.length > 0)
+    .filter((e) => e.sets.length > 0 && !e.timed)
     .map((e) => {
       const prevSets = priorLogs
-        .flatMap((pl) => pl.exercises.filter((pe) => keyOf(pe) === keyOf(e)).flatMap((pe) => pe.sets));
+        .flatMap((pl) => pl.exercises.filter((pe) => keyOf(pe) === keyOf(e) && !pe.timed).flatMap((pe) => pe.sets));
       const prevBest = Math.max(0, ...prevSets.map((st) => e1rm(st.weight, st.reps)));
       const bestSet = e.sets.reduce((a, b) => (e1rm(b.weight, b.reps) > e1rm(a.weight, a.reps) ? b : a), e.sets[0]);
       const curBest = e1rm(bestSet.weight, bestSet.reps);

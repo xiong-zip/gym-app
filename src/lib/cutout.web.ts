@@ -6,12 +6,13 @@
  * CDN/模型加载失败时返回 null，调用方回退为整张照片贴纸。
  */
 import { Asset } from 'expo-asset';
+import { renderSticker, STICKER_INPUT, STICKER_MAX_SIDE, upscaleMask } from './sticker';
 import type { CutoutResult } from './cutout.types';
 
 export type { CutoutResult };
 
-const INPUT = 320;      // 模型输入边长
-const MAX_SIDE = 720;   // 贴纸最大边
+const INPUT = STICKER_INPUT;    // 模型输入边长
+const MAX_SIDE = STICKER_MAX_SIDE; // 贴纸最大边
 // CDN 多源依次尝试（jsdelivr 在部分网络不可达，npmmirror 国内最稳）
 const ORT_CDNS = [
   'https://registry.npmmirror.com/onnxruntime-web/1.19.2/files/dist',
@@ -94,42 +95,6 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-/** 盒状膨胀（分离式 max filter，迭代 r 次近似半径 r）——与原生端同款 */
-function dilate(mask: Uint8Array, w: number, h: number, r: number): Uint8Array {
-  let cur = mask;
-  for (let it = 0; it < r; it++) {
-    const tmp = new Uint8Array(w * h);
-    for (let y = 0; y < h; y++) {
-      for (let x = 1; x < w; x++) tmp[y * w + x] = Math.max(cur[y * w + x], cur[y * w + x - 1]);
-      tmp[y * w] = cur[y * w];
-    }
-    const tmp2 = new Uint8Array(w * h);
-    for (let y = 1; y < h; y++) {
-      for (let x = 0; x < w; x++) tmp2[y * w + x] = Math.max(tmp[y * w + x], tmp[y * w + x - w]);
-    }
-    for (let x = 0; x < w; x++) tmp2[x] = tmp[x];
-    cur = tmp2;
-  }
-  return cur;
-}
-
-/** 单通道 mask 双线性放大 */
-function upscaleMask(src: Float32Array, s: number, w: number, h: number): Float32Array {
-  const out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    const fy = Math.min(s - 1, (y + 0.5) * s / h - 0.5);
-    const y0 = Math.max(0, Math.floor(fy)), y1 = Math.min(s - 1, y0 + 1), wy = fy - y0;
-    for (let x = 0; x < w; x++) {
-      const fx = Math.min(s - 1, (x + 0.5) * s / w - 0.5);
-      const x0 = Math.max(0, Math.floor(fx)), x1 = Math.min(s - 1, x0 + 1), wx = fx - x0;
-      const top = src[y0 * s + x0] * (1 - wx) + src[y0 * s + x1] * wx;
-      const bot = src[y1 * s + x0] * (1 - wx) + src[y1 * s + x1] * wx;
-      out[y * w + x] = top * (1 - wy) + bot * wy;
-    }
-  }
-  return out;
-}
-
 export async function cutoutSticker(src: string): Promise<CutoutResult | null> {
   try {
     const ort = await loadOrt();
@@ -179,63 +144,19 @@ export async function cutoutSticker(src: string): Promise<CutoutResult | null> {
     const smallMask = new Float32Array(n);
     for (let i = 0; i < n; i++) smallMask[i] = (logits[i] - mn) / span;
 
-    // 5. 放大 → 二值 alpha，无主体则放弃
+    // 5. 放大 → 描边贴纸（SDF 抗锯齿 + 柔影），无主体则放弃
     const mask = upscaleMask(smallMask, INPUT, w, h);
-    const alpha = new Uint8Array(w * h);
-    let sum = 0;
-    for (let i = 0; i < alpha.length; i++) {
-      alpha[i] = mask[i] > 0.5 ? 255 : 0;
-      sum += alpha[i];
-    }
-    if (sum < w * h * 0.005 * 255) return null;
+    const sticker = renderSticker(rgba, w, h, mask);
+    if (!sticker) return null;
 
-    // 6. 白描边（膨胀）
-    const r = Math.max(3, Math.round(Math.min(w, h) / 110));
-    const ring = dilate(alpha, w, h, r);
-
-    // 7. 主体包围盒裁剪
-    let minX = w, minY = h, maxX = 0, maxY = 0;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (ring[y * w + x]) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-    const pad = r + 4;
-    minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
-    maxX = Math.min(w - 1, maxX + pad); maxY = Math.min(h - 1, maxY + pad);
-    const cw = maxX - minX + 1, ch = maxY - minY + 1;
-
-    // 8. 合成：主体原色（软边）+ 白描边，其余透明
-    const out = new Uint8ClampedArray(cw * ch * 4);
-    for (let y = 0; y < ch; y++) {
-      for (let x = 0; x < cw; x++) {
-        const si = (minY + y) * w + (minX + x);
-        const di = (y * cw + x) * 4;
-        const soft = Math.max(0, Math.min(1, (mask[si] - 0.42) / 0.16));
-        if (ring[si] !== 0) { // dilate 输出是 0/255，不能与 1 比较
-          if (soft > 0.02) {
-            const so = si * 4;
-            out[di] = rgba[so]; out[di + 1] = rgba[so + 1]; out[di + 2] = rgba[so + 2];
-            out[di + 3] = Math.round(soft * 255);
-          } else {
-            out[di] = 255; out[di + 1] = 255; out[di + 2] = 255; out[di + 3] = 255;
-          }
-        }
-      }
-    }
-
-    // 9. 输出 PNG data URI
+    // 6. 输出 PNG data URI
     const outCanvas = document.createElement('canvas');
-    outCanvas.width = cw; outCanvas.height = ch;
+    outCanvas.width = sticker.width;
+    outCanvas.height = sticker.height;
     const outCtx = outCanvas.getContext('2d');
     if (!outCtx) return null;
-    outCtx.putImageData(new ImageData(out, cw, ch), 0, 0);
-    return { uri: outCanvas.toDataURL('image/png'), width: cw, height: ch };
+    outCtx.putImageData(new ImageData(Uint8ClampedArray.from(sticker.data), sticker.width, sticker.height), 0, 0);
+    return { uri: outCanvas.toDataURL('image/png'), width: sticker.width, height: sticker.height };
   } catch {
     return null;
   }

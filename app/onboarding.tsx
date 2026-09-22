@@ -9,7 +9,7 @@ import { useProfileStore } from '../src/store/profile';
 import { C, FONT, R } from '../src/theme';
 import type { ActivityLevel, EquipmentAccess, Experience, Gender, Goal, Profile } from '../src/types';
 
-const STEPS = ['基本信息', '身体数据', '训练目标', '训练经验', '训练安排', '器械条件'];
+const STEPS = ['基本信息', '目标与经验', '训练安排'];
 
 const GOALS: { value: Goal; label: string; sub: string }[] = [
   { value: 'cut', label: '减脂', sub: '降低体脂，保留肌肉' },
@@ -73,35 +73,22 @@ export default function Onboarding() {
   };
 
   const stepValid = (): boolean => {
-    switch (step) {
-      case 0: {
-        const a = Number(age);
-        return a >= 14 && a <= 90;
-      }
-      case 1: {
-        const h = Number(heightCm);
-        const w = Number(weightKg);
-        return h >= 120 && h <= 230 && w >= 30 && w <= 250;
-      }
-      default:
-        return true;
-    }
+    if (step !== 0) return true;
+    const a = Number(age);
+    const h = Number(heightCm);
+    const w = Number(weightKg);
+    return a >= 14 && a <= 90 && h >= 120 && h <= 230 && w >= 30 && w <= 250;
   };
 
   // 越界时告诉用户为什么点不动「下一步」
   const stepError = (): string | null => {
-    if (step === 0) {
-      const a = Number(age);
-      if (!a || a < 14 || a > 90) return '年龄需填 14-90 之间，未成年人请在家长指导下训练';
-      return null;
-    }
-    if (step === 1) {
-      const h = Number(heightCm);
-      const w = Number(weightKg);
-      if (!h || h < 120 || h > 230) return '身高需填 120-230cm 之间';
-      if (!w || w < 30 || w > 250) return '体重需填 30-250kg 之间';
-      return null;
-    }
+    if (step !== 0) return null;
+    const a = Number(age);
+    if (!a || a < 14 || a > 90) return '年龄需填 14-90 之间，未成年人请在家长指导下训练';
+    const h = Number(heightCm);
+    const w = Number(weightKg);
+    if (!h || h < 120 || h > 230) return '身高需填 120-230cm 之间';
+    if (!w || w < 30 || w > 250) return '体重需填 30-250kg 之间';
     return null;
   };
 
@@ -137,55 +124,50 @@ export default function Onboarding() {
                 </Press>
               </View>
             </Field>
-            <Field label="年龄">
-              <NumberInput value={age} onChange={setAge} suffix="岁" placeholder="25" />
-            </Field>
-            <Sub>基础代谢与营养目标会根据性别、年龄、身高体重自动计算。</Sub>
+            <View style={s.row3}>
+              <Field label="年龄" style={{ flex: 1 }}>
+                <NumberInput value={age} onChange={setAge} suffix="岁" placeholder="25" />
+              </Field>
+              <Field label="身高" style={{ flex: 1 }}>
+                <NumberInput value={heightCm} onChange={setHeightCm} suffix="cm" placeholder="175" />
+              </Field>
+              <Field label="体重" style={{ flex: 1 }}>
+                <NumberInput value={weightKg} onChange={setWeightKg} suffix="kg" placeholder="70" />
+              </Field>
+            </View>
+            <Sub>基础代谢、营养目标与训练安排都会照这些自动算，之后随时可改。</Sub>
           </>
         )}
 
         {step === 1 && (
           <>
-            <Field label="身高">
-              <NumberInput value={heightCm} onChange={setHeightCm} suffix="cm" placeholder="175" />
+            <Field label="训练目标">
+              <View style={s.grid2}>
+                {GOALS.map((g) => (
+                  <Press key={g.value} style={[s.gridCell, goal === g.value && s.gridCellOn]} onPress={() => setGoal(g.value)} haptic="medium">
+                    <Text style={[s.gridT, goal === g.value && s.gridTTOn]}>{g.label}</Text>
+                    <Sub style={{ fontSize: 11, color: goal === g.value ? C.markerInk : C.sub }}>{g.sub}</Sub>
+                  </Press>
+                ))}
+              </View>
             </Field>
-            <Field label="体重">
-              <NumberInput value={weightKg} onChange={setWeightKg} suffix="kg" placeholder="70" />
+            <Field label="训练经验">
+              <View style={s.row3}>
+                {EXP.map((e) => (
+                  <Press key={e.value} style={[s.expCell, experience === e.value && s.gridCellOn]} onPress={() => setExperience(e.value)} haptic="medium">
+                    <Text style={[s.gridT, experience === e.value && s.gridTTOn]}>{e.label}</Text>
+                    <Sub style={{ fontSize: 11, color: experience === e.value ? C.markerInk : C.sub }}>
+                      {e.value === 'beginner' ? '1 年内' : e.value === 'intermediate' ? '1-3 年' : '3 年以上'}
+                    </Sub>
+                  </Press>
+                ))}
+              </View>
             </Field>
-            <Sub>体重之后可以在「手帐」页随时更新，用于追踪变化。</Sub>
+            <Sub>经验等级影响推荐动作的难度与组次数安排。</Sub>
           </>
         )}
 
         {step === 2 && (
-          <View style={s.col}>
-            {GOALS.map((g) => (
-              <Press key={g.value} style={[s.listOpt, goal === g.value && s.listOptOn]} onPress={() => setGoal(g.value)} haptic="medium">
-                <View>
-                  <Text style={[s.listOptT, goal === g.value && s.listOptTOn]}>{g.label}</Text>
-                  <Sub>{g.sub}</Sub>
-                </View>
-                {goal === g.value ? <Text style={s.pickMark}>✎</Text> : null}
-              </Press>
-            ))}
-          </View>
-        )}
-
-        {step === 3 && (
-          <View style={s.col}>
-            {EXP.map((e) => (
-              <Press key={e.value} style={[s.listOpt, experience === e.value && s.listOptOn]} onPress={() => setExperience(e.value)} haptic="medium">
-                <View>
-                  <Text style={[s.listOptT, experience === e.value && s.listOptTOn]}>{e.label}</Text>
-                  <Sub>{e.sub}</Sub>
-                </View>
-                {experience === e.value ? <Text style={s.pickMark}>✎</Text> : null}
-              </Press>
-            ))}
-            <Sub>经验等级影响推荐动作的难度与组次数安排。</Sub>
-          </View>
-        )}
-
-        {step === 4 && (
           <>
             <Field label="每周训练几天">
               <Segmented
@@ -201,25 +183,16 @@ export default function Onboarding() {
                 ))}
               </View>
             </Field>
-            <Sub>{`安排：${daysPerWeek <= 3 ? '全身训练为主' : daysPerWeek === 4 ? '上下肢分化' : '推拉腿分化'}；活动量影响每日消耗估算：${ACTIVITY_ZH[activityLevel]}`}</Sub>
-          </>
-        )}
-
-        {step === 5 && (
-          <>
             <Field label="训练条件">
-              <View style={s.col}>
+              <View style={s.row3}>
                 {EQUIPS.map((e) => (
-                  <Press key={e.value} style={[s.listOpt, equipment === e.value && s.listOptOn]} onPress={() => setEquipment(e.value)} haptic="medium">
-                    <View>
-                      <Text style={[s.listOptT, equipment === e.value && s.listOptTOn]}>{e.label}</Text>
-                      <Sub>{EQUIP_ACCESS_TEXT[e.value]}</Sub>
-                    </View>
-                    {equipment === e.value ? <Text style={s.pickMark}>✎</Text> : null}
+                  <Press key={e.value} style={[s.expCell, equipment === e.value && s.gridCellOn]} onPress={() => setEquipment(e.value)} haptic="medium">
+                    <Text style={[s.gridT, equipment === e.value && s.gridTTOn]}>{e.label}</Text>
                   </Press>
                 ))}
               </View>
             </Field>
+            <Sub>{`安排：${daysPerWeek <= 3 ? '全身训练为主' : daysPerWeek === 4 ? '上下肢分化' : '推拉腿分化'} · ${ACTIVITY_ZH[activityLevel]}\n${EQUIP_ACCESS_TEXT[equipment]}`}</Sub>
             <Card style={s.preview}>
               <View style={s.previewMark}>
                 <Text style={s.previewT}>你的每日目标</Text>
@@ -272,6 +245,19 @@ const s = StyleSheet.create({
     backgroundColor: C.card,
   },
   row2: { flexDirection: 'row', gap: 12 },
+  row3: { flexDirection: 'row', gap: 10 },
+  grid2: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  gridCell: {
+    width: '47.5%', borderRadius: R.md, borderWidth: 1.5, borderColor: C.inkAlpha, backgroundColor: C.card,
+    paddingHorizontal: 14, paddingVertical: 11, gap: 2,
+  },
+  gridCellOn: { backgroundColor: C.marker, borderColor: 'rgba(107,90,16,0.4)' },
+  gridT: { color: C.text, fontSize: 16, fontWeight: '700' },
+  gridTTOn: { color: C.markerInk },
+  expCell: {
+    flex: 1, borderRadius: R.md, borderWidth: 1.5, borderColor: C.inkAlpha, backgroundColor: C.card,
+    paddingVertical: 11, alignItems: 'center', gap: 2,
+  },
   bigOpt: {
     flex: 1, height: 56, borderRadius: R.md, borderWidth: 1.5, borderColor: C.inkAlpha,
     backgroundColor: C.card, alignItems: 'center', justifyContent: 'center',
@@ -279,15 +265,6 @@ const s = StyleSheet.create({
   bigOptOn: { backgroundColor: C.marker, borderColor: 'rgba(107,90,16,0.4)' },
   bigOptT: { color: C.text, fontSize: 17, fontWeight: '700' },
   bigOptTOn: { color: C.markerInk },
-  col: { gap: 10 },
-  listOpt: {
-    borderRadius: R.md, borderWidth: 1.5, borderColor: C.inkAlpha, backgroundColor: C.card,
-    paddingHorizontal: 16, paddingVertical: 13, flexDirection: 'row', alignItems: 'center',
-  },
-  listOptOn: { borderColor: C.accent, backgroundColor: '#FBEDE6' },
-  listOptT: { color: C.text, fontSize: 16, fontWeight: '700', marginBottom: 2 },
-  listOptTOn: { color: C.accent },
-  pickMark: { color: C.accent, fontSize: 18, fontWeight: '900', marginLeft: 'auto' },
   wrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   errBox: {
     marginHorizontal: 20, marginBottom: 8, backgroundColor: '#F6DBD5',

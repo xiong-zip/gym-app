@@ -235,9 +235,9 @@ export function TextInputLine({
   );
 }
 
-export function Field({ label, children }: { label: string; children: ReactNode }) {
+export function Field({ label, children, style }: { label: string; children: ReactNode; style?: StyleProp<ViewStyle> }) {
   return (
-    <View style={s.field}>
+    <View style={[s.field, style]}>
       <Text style={s.fieldLabel}>{label}</Text>
       {children}
     </View>

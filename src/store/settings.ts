@@ -8,10 +8,13 @@ interface SettingsState {
   ai: AISettings;
   /** 组间休息结束的提示音（web 恒无声音） */
   sound: boolean;
+  /** 组间语音播报（仅手机端，web 恒静音） */
+  voice: boolean;
   reminder: ReminderSettings;
   _h: boolean;
   setAI: (p: Partial<AISettings>) => void;
   setSound: (v: boolean) => void;
+  setVoice: (v: boolean) => void;
   setReminder: (p: Partial<ReminderSettings>) => void;
 }
 
@@ -27,10 +30,12 @@ export const useSettingsStore = create<SettingsState>()(
     (set) => ({
       ai: DEFAULT_AI,
       sound: true,
+      voice: true,
       reminder: { enabled: false, hour: 19, minute: 0 },
       _h: false,
       setAI: (p) => set((s) => ({ ai: { ...s.ai, ...p } })),
       setSound: (v) => set({ sound: v }),
+      setVoice: (v) => set({ voice: v }),
       setReminder: (p) => set((s) => ({ reminder: { ...s.reminder, ...p } })),
     }),
     {

@@ -1,8 +1,8 @@
 /**
  * 端上主体抠图（描边贴纸）
  * u2netp 分割模型（4.7MB，Apache-2.0）通过 onnxruntime 在手机本地推理：
- * 照片 → 主体遮罩 → 外扩白描边 → 透明 PNG 贴纸。
- * 仅原生端可用；Web 端返回 null（调用方回退为整张照片）。
+ * 照片 → 主体遮罩 → 描边贴纸合成（src/lib/sticker.ts）→ 透明 PNG。
+ * 仅原生端可用；Web 端见 cutout.web.ts。
  */
 import { Platform } from 'react-native';
 import { Asset } from 'expo-asset';
@@ -10,9 +10,13 @@ import { Directory, File, Paths } from 'expo-file-system';
 import * as ort from 'onnxruntime-react-native';
 import jpeg from 'jpeg-js';
 import { deflate } from 'pako';
+import { renderSticker, STICKER_INPUT, STICKER_MAX_SIDE, upscaleMask } from './sticker';
+import type { CutoutResult } from './cutout.types';
 
-const INPUT = 320;          // 模型输入边长
-const MAX_SIDE = 720;       // 贴纸最大边（控制内存与文件体积）
+export type { CutoutResult };
+
+const INPUT = STICKER_INPUT;
+const MAX_SIDE = STICKER_MAX_SIDE;
 
 let sessionP: Promise<ort.InferenceSession> | null = null;
 
@@ -138,54 +142,7 @@ function toTensorData(img: Uint8Array, w: number, h: number): Float32Array {
   return data;
 }
 
-/** 单通道 mask 双线性放大 */
-function upscaleMask(src: Float32Array, s: number, w: number, h: number): Float32Array {
-  const out = new Float32Array(w * h);
-  const r = s / 1;
-  for (let y = 0; y < h; y++) {
-    const fy = Math.min(s - 1, (y + 0.5) * s / h - 0.5);
-    const y0 = Math.max(0, Math.floor(fy)), y1 = Math.min(s - 1, y0 + 1), wy = fy - y0;
-    for (let x = 0; x < w; x++) {
-      const fx = Math.min(s - 1, (x + 0.5) * s / w - 0.5);
-      const x0 = Math.max(0, Math.floor(fx)), x1 = Math.min(s - 1, x0 + 1), wx = fx - x0;
-      const top = src[y0 * s + x0] * (1 - wx) + src[y0 * s + x1] * wx;
-      const bot = src[y1 * s + x0] * (1 - wx) + src[y1 * s + x1] * wx;
-      out[y * w + x] = top * (1 - wy) + bot * wy;
-    }
-  }
-  void r;
-  return out;
-}
-
-/** 盒状膨胀（分离式 max filter，迭代 r 次近似半径 r） */
-function dilate(mask: Uint8Array, w: number, h: number, r: number): Uint8Array {
-  let cur = mask;
-  for (let it = 0; it < r; it++) {
-    const tmp = new Uint8Array(w * h);
-    for (let y = 0; y < h; y++) {
-      for (let x = 1; x < w; x++) {
-        const i = y * w + x;
-        tmp[i] = Math.max(cur[i], cur[i - 1]);
-      }
-      tmp[y * w] = cur[y * w];
-    }
-    const tmp2 = new Uint8Array(w * h);
-    for (let y = 1; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x;
-        tmp2[i] = Math.max(tmp[i], tmp[i - w]);
-      }
-    }
-    for (let x = 0; x < w; x++) tmp2[x] = tmp[x];
-    cur = tmp2;
-  }
-  return cur;
-}
-
 /* ---------- 主流程 ---------- */
-
-import type { CutoutResult } from './cutout.types';
-export type { CutoutResult };
 
 /**
  * 把照片抠成白描边贴纸。
@@ -228,71 +185,18 @@ export async function cutoutSticker(src: string): Promise<CutoutResult | null> {
     const smallMask = new Float32Array(INPUT * INPUT);
     for (let i = 0; i < smallMask.length; i++) smallMask[i] = (logits[i] - mn) / span;
 
-    // 5. 放大到图像尺寸
+    // 5. 放大到图像尺寸 → 描边贴纸（SDF 抗锯齿 + 柔影）
     const mask = upscaleMask(smallMask, INPUT, w, h);
+    const sticker = renderSticker(rgba, w, h, mask);
+    if (!sticker) return null;
 
-    // 6. 二值 + 软边 alpha
-    const alpha = new Uint8Array(w * h);
-    for (let i = 0; i < alpha.length; i++) {
-      alpha[i] = mask[i] > 0.5 ? 255 : 0;
-    }
-    let sum = 0;
-    for (let i = 0; i < alpha.length; i++) sum += alpha[i];
-    if (sum < w * h * 0.005) return null; // 没检出主体，放弃
-
-    // 7. 白描边（膨胀），描边宽度随图自适应
-    const r = Math.max(3, Math.round(Math.min(w, h) / 110));
-    const ring = dilate(alpha, w, h, r);
-
-    // 8. 按主体包围盒裁剪
-    let minX = w, minY = h, maxX = 0, maxY = 0;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        if (ring[y * w + x]) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
-      }
-    }
-    const pad = r + 4;
-    minX = Math.max(0, minX - pad); minY = Math.max(0, minY - pad);
-    maxX = Math.min(w - 1, maxX + pad); maxY = Math.min(h - 1, maxY + pad);
-    const cw = maxX - minX + 1, ch = maxY - minY + 1;
-
-    // 9. 合成 RGBA：主体原色 + 白描边 + 主体边缘抗锯齿
-    const out = new Uint8Array(cw * ch * 4);
-    for (let y = 0; y < ch; y++) {
-      for (let x = 0; x < cw; x++) {
-        const si = (minY + y) * w + (minX + x);
-        const di = (y * cw + x) * 4;
-        const m = mask[si];
-        const inRing = ring[si] !== 0; // dilate 输出是 0/255，不能与 1 比较
-        const soft = Math.max(0, Math.min(1, (m - 0.42) / 0.16)); // 0..1 软边
-        const so = (minY + y) * w * 4 + (minX + x) * 4;
-        if (inRing) {
-          if (soft > 0.02) {
-            // 主体（含过渡）：原色，alpha 平滑
-            out[di] = rgba[so]; out[di + 1] = rgba[so + 1]; out[di + 2] = rgba[so + 2];
-            out[di + 3] = Math.round(soft * 255);
-          } else {
-            // 纯描边：白色不透明
-            out[di] = 255; out[di + 1] = 255; out[di + 2] = 255; out[di + 3] = 255;
-          }
-        } else {
-          out[di + 3] = 0;
-        }
-      }
-    }
-
-    // 10. 编码 PNG 存文件
-    const png = encodePNG(cw, ch, out);
+    // 6. 编码 PNG 存文件
+    const png = encodePNG(sticker.width, sticker.height, sticker.data);
     const dir = new Directory(Paths.document, 'stickers');
     if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
     const file = new File(dir, `st-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
     file.write(png);
-    return { uri: file.uri, width: cw, height: ch };
+    return { uri: file.uri, width: sticker.width, height: sticker.height };
   } catch {
     return null;
   }

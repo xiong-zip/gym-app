@@ -1,5 +1,5 @@
 import { useRouter } from 'expo-router';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Animated, Button, Card, FadeInDown, NumberInput, Press, Ring, Scroll, Sheet, Stamp, Stat, Sub, stagger } from '../../src/components/ui';
@@ -8,9 +8,12 @@ import { WeightChart } from '../../src/components/WeightChart';
 import { MUSCLE_ZH } from '../../src/data/exercises';
 import { addDays, dateKey, fmtCN, fmtDur, todayKey, weekdayOf } from '../../src/lib/date';
 import { shareViewShot } from '../../src/lib/shot';
+import { chat } from '../../src/lib/ai';
 import { calcNutrition, GOAL_ZH } from '../../src/lib/nutrition';
+import { volumeOfLog, weekPRs } from '../../src/lib/review';
+import { seasonOf } from '../../src/lib/season';
 import {
-  generateSessionPlan, nextSessionAfter, sessionForWeekday, weekSchedule,
+  buildQuickPlan, generateSessionPlan, nextSessionAfter, sessionForWeekday, weekSchedule,
 } from '../../src/lib/planner';
 import { useDietStore } from '../../src/store/diet';
 import { useJournalStore } from '../../src/store/journal';
@@ -18,6 +21,7 @@ import { latestWeight, useMetricsStore } from '../../src/store/metrics';
 import { useProfileStore } from '../../src/store/profile';
 import { useScheduleStore } from '../../src/store/schedule';
 import { useSessionDraftStore } from '../../src/store/sessionDraft';
+import { useSettingsStore } from '../../src/store/settings';
 import { useWorkoutsStore } from '../../src/store/workouts';
 import { C, FONT, R, TAPE } from '../../src/theme';
 import type { WorkoutLog } from '../../src/types';
@@ -38,11 +42,30 @@ export default function TodayScreen() {
   const draft = useSessionDraftStore((s) => s.draft);
   const clearDraft = useSessionDraftStore((s) => s.clear);
   const jEntries = useJournalStore((s) => s.entries);
+  const ai = useSettingsStore((s) => s.ai);
   const [wOpen, setWOpen] = useState(false);
   const [wInput, setWInput] = useState('');
   const [dayPick, setDayPick] = useState(todayKey()); // 本周安排：tab 式选中的回顾日期
   const [posterOpen, setPosterOpen] = useState(false);
   const posterRef = useRef<View>(null);
+  // AI 复盘（本周回顾卡）
+  const [aiReview, setAiReview] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  // 打开就有课表：今天该练但还没安排时自动排一份，省掉「制定计划」这一步
+  const autoPlanned = useRef(false);
+  useEffect(() => {
+    if (autoPlanned.current || !profile) return;
+    autoPlanned.current = true;
+    const key = todayKey();
+    if (assignments.some((a) => a.date === key)) return;
+    if (logs.some((l) => l.date === key)) return;
+    const d = useSessionDraftStore.getState().draft;
+    if (d && dateKey(new Date(d.startedAt)) === key) return;
+    const type = sessionForWeekday(profile.daysPerWeek, weekdayOf(key));
+    if (!type) return; // 休息日不自动安排
+    assign(key, generateSessionPlan(type, profile, `${key}|${type}|auto`));
+  }, [profile, assignments, logs, assign]);
 
   if (!profile) return <View style={{ flex: 1, backgroundColor: C.bg }} />;
 
@@ -102,6 +125,12 @@ export default function TodayScreen() {
     router.push({ pathname: '/session', params: { plan: encodeURIComponent(JSON.stringify(todayAssign.plan)) } });
   };
 
+  /** 5 分钟保底训练：不排进计划，开练就走 */
+  const startQuick = () => {
+    const p = buildQuickPlan();
+    router.push({ pathname: '/session', params: { plan: encodeURIComponent(JSON.stringify(p)) } });
+  };
+
   const saveWeight = () => {
     const w = Number(wInput);
     if (!w || w < 30 || w > 250) return;
@@ -112,6 +141,7 @@ export default function TodayScreen() {
 
   const hour = new Date().getHours();
   const greet = hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
+  const season = seasonOf();
   const d = new Date();
   const dateText = `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
   const dateText2 = `周${WEEK_LABELS[(wd + 6) % 7]}`;
@@ -123,9 +153,7 @@ export default function TodayScreen() {
 
   // 本周回顾：与上个周期比较（训练容量 / 饮食记录天数 / 体重变化）
   const lastMonday = addDays(monday, -7);
-  const volumeOf = (arr: WorkoutLog[]) => arr.reduce(
-    (a, l) => a + l.exercises.reduce((b, e) => b + e.sets.reduce((c, x) => c + x.weight * x.reps, 0), 0), 0,
-  );
+  const volumeOf = (arr: WorkoutLog[]) => arr.reduce((a, l) => a + volumeOfLog(l), 0);
   const thisWeekLogs = logs.filter((l) => l.date >= monday && l.date <= today);
   const lastWeekLogs = logs.filter((l) => l.date >= lastMonday && l.date < monday);
   const thisVol = Math.round(volumeOf(thisWeekLogs));
@@ -134,6 +162,12 @@ export default function TodayScreen() {
   const wPrev = [...metrics].reverse().find((m) => m.date < monday)?.weightKg ?? null;
   const wCur = metrics.length && metrics[metrics.length - 1].date >= monday ? metrics[metrics.length - 1].weightKg : null;
   const wDelta = wPrev != null && wCur != null ? +(wCur - wPrev).toFixed(1) : null;
+  // 本周新纪录 + 手帐照片（分享海报拼贴用）
+  const weekPrList = weekPRs(logs, monday);
+  const weekPhotos = jEntries
+    .filter((e) => e.date >= monday && e.date <= today)
+    .flatMap((e) => e.photos ?? [])
+    .slice(-3);
 
   const buildWeekText = () => {
     const volTon = Math.round((thisVol / 1000) * 10) / 10;
@@ -142,14 +176,35 @@ export default function TodayScreen() {
       `🏋️ 训练 ${weekDone} 次 · 总容量 ${volTon} 吨`,
       `🍚 饮食记录 ${dietDays} 天`,
     ];
+    if (weekPrList.length) lines.push(`🏆 新纪录 ${weekPrList.length} 项：${weekPrList.slice(0, 2).map((p) => p.name).join('、')}`);
     if (wDelta !== null) lines.push(`⚖️ 体重 ${wDelta > 0 ? '+' : ''}${wDelta}kg`);
     if (streak > 1) lines.push(`🔥 连续达标 ${streak} 个训练日`);
-    lines.push('—— 训练手帐，贴满每一天');
+    lines.push(`—— ${season.quote}`);
     return lines.join('\n');
   };
 
   const doSharePoster = async () => {
     await shareViewShot(posterRef, buildWeekText());
+  };
+
+  /** AI 教练复盘：把本周数据喂给模型，换一段搭子口吻的点评 */
+  const runAiReview = async () => {
+    setAiLoading(true);
+    setAiReview(null);
+    try {
+      const weekDietLogs = dietLogs.filter((l) => l.date >= monday && l.date <= today);
+      const avgKcal = dietDays ? Math.round(weekDietLogs.reduce((a, b) => a + b.kcal, 0) / dietDays) : 0;
+      const prompt = [
+        '你是健身教练「搭子」，根据用户本周数据写一段复盘。口吻轻松接地气，称呼用户「铁铁」；先一句话肯定亮点，再给 1-2 条下周具体可执行的建议；全文不超过 110 字，不用列表、不用表情符号。',
+        `本周数据：训练 ${weekDone} 次（计划 ${weekPlanned} 次），总容量 ${thisVol}kg，饮食记录 ${dietDays} 天${avgKcal ? `，日均摄入 ${avgKcal} kcal（目标 ${nut.kcal}）` : ''}，${wDelta !== null ? `体重变化 ${wDelta > 0 ? '+' : ''}${wDelta}kg` : '体重未记录'}${streak > 1 ? `，连续达标 ${streak} 个训练日` : ''}${weekPrList.length ? `，新纪录：${weekPrList.slice(0, 3).map((p) => `${p.name} 估算1RM ${p.prev}→${p.cur}kg`).join('、')}` : ''}。`,
+      ].join('\n');
+      const out = await chat(ai, [{ role: 'user', content: prompt }], 0.7);
+      setAiReview(out.trim().slice(0, 180));
+    } catch (e) {
+      Alert.alert('AI 复盘失败', e instanceof Error ? e.message : '请稍后重试');
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   let streak = 0;
@@ -171,9 +226,6 @@ export default function TodayScreen() {
   const pickKcal = dayPick ? Math.round(dietLogs.filter((l) => l.date === dayPick).reduce((a, b) => a + b.kcal, 0)) : 0;
   const pickWeight = dayPick ? metrics.find((m) => m.date === dayPick)?.weightKg ?? null : null;
   const pickJournal = dayPick ? jEntries.filter((e) => e.date === dayPick).length : 0;
-  const volOfLog = (l: WorkoutLog) => Math.round(
-    l.exercises.reduce((a, e) => a + e.sets.reduce((b, x) => b + x.weight * x.reps, 0), 0),
-  );
 
   const renderPlanExercises = () => {
     const exs = todayAssign!.plan.exercises;
@@ -198,10 +250,10 @@ export default function TodayScreen() {
       <Scroll contentContainerStyle={s.body}>
         <View style={s.head}>
           <View>
-            <Text style={s.greet}>{greet}</Text>
+            <Text style={s.greet}>{`${greet} ${season.emojis[0]}`}</Text>
             <View style={s.dateRow}>
               <Text style={s.dateHand}>{dateText}</Text>
-              <Text style={s.dateSub}> {dateText2}</Text>
+              <Text style={s.dateSub}> {dateText2} · {season.greet}</Text>
             </View>
           </View>
           <Stamp label={GOAL_ZH[profile.goal]} fontSize={11} rotate={4} />
@@ -278,17 +330,32 @@ export default function TodayScreen() {
                 </Sub>
                 <View style={s.btnRow}>
                   <Button title="今天加练一次" kind="ghost" onPress={makeTodayPlan} />
+                  <Button title="5分钟保底" kind="ghost" small onPress={startQuick} />
+                </View>
+              </>
+            ) : !sessionForWeekday(profile.daysPerWeek, wd) ? (
+              <>
+                <Sub>{`今天是休息日（每周练 ${profile.daysPerWeek} 天）`}</Sub>
+                <Text style={s.title}>好好休息</Text>
+                <Sub style={{ marginTop: 4 }}>
+                  休息也是训练的一部分。想动一动就点「5分钟保底」，或把这一周的计划先排好。
+                </Sub>
+                <View style={s.btnRow}>
+                  <Button title="5分钟保底" onPress={startQuick} />
+                  <Button title="排好本周计划" kind="ghost" small onPress={makeWeekPlan} />
                 </View>
               </>
             ) : (
               <>
+                <Sub>今天的课表马上就好</Sub>
                 <Text style={s.title}>还没有制定计划</Text>
                 <Sub style={{ marginTop: 4 }}>
-                  {`先制定一份训练计划，之后每天打开就会直接显示当天要练的内容。按你的安排（每周${profile.daysPerWeek}天）自动排部位、自动跳过休息日。`}
+                  点一下，按你的目标与条件自动排今天的训练；也可以先排好这一周。
                 </Sub>
                 <View style={s.btnRow}>
                   <Button title="制定今日计划" onPress={makeTodayPlan} />
                   <Button title="制定本周计划" kind="ghost" onPress={makeWeekPlan} />
+                  <Button title="5分钟保底" kind="ghost" small onPress={startQuick} />
                 </View>
               </>
             )}
@@ -296,6 +363,23 @@ export default function TodayScreen() {
         </Animated.View>
 
         <Animated.View entering={stagger(1)}>
+          <Press onPress={() => router.navigate('/diet')} style={s.dietPress}>
+            <Card style={s.dietCard}>
+              <Ring size={64} stroke={7} progress={nut.kcal > 0 ? consumed / nut.kcal : 0} color={consumed > nut.kcal ? C.danger : C.good}>
+                <Text style={s.ringT}>{Math.max(0, nut.kcal - consumed)}</Text>
+              </Ring>
+              <View style={{ flex: 1 }}>
+                <Text style={s.dietT}>今日饮食</Text>
+                <Sub>
+                  {`已摄入 ${Math.round(consumed)} / 目标 ${nut.kcal} kcal${consumed > nut.kcal ? ' · 已超标' : ''}`}
+                </Sub>
+              </View>
+              <Text style={s.arrow}>›</Text>
+            </Card>
+          </Press>
+        </Animated.View>
+
+        <Animated.View entering={stagger(2)}>
           <Card style={s.week}>
             <View style={s.weekHead}>
               <Text style={s.weekT}>本周安排</Text>
@@ -353,7 +437,7 @@ export default function TodayScreen() {
                       <Stamp label="已完成" fontSize={8} rotate={-6} />
                     </View>
                     <Sub>
-                      {`${l.exercises.reduce((a, e) => a + e.sets.length, 0)} 组 · 总容量 ${volOfLog(l)} kg · 用时 ${fmtDur(l.durationSec)}`}
+                      {`${l.exercises.reduce((a, e) => a + e.sets.length, 0)} 组 · 总容量 ${volumeOfLog(l)} kg · 用时 ${fmtDur(l.durationSec)}`}
                     </Sub>
                     {l.exercises.map((e, i) => (
                       <View key={`${e.exerciseId}-${i}`} style={s.pickExRow}>
@@ -474,24 +558,32 @@ export default function TodayScreen() {
                 }${wDelta !== null ? ` · 体重 ${wDelta > 0 ? '+' : ''}${wDelta}kg` : ''}`}
               </Sub>
             ) : null}
-          </Card>
-        </Animated.View>
-
-        <Animated.View entering={stagger(4)}>
-          <Press onPress={() => router.navigate('/diet')} style={s.dietPress}>
-            <Card style={s.dietCard}>
-              <Ring size={64} stroke={7} progress={nut.kcal > 0 ? consumed / nut.kcal : 0} color={consumed > nut.kcal ? C.danger : C.good}>
-                <Text style={s.ringT}>{Math.max(0, nut.kcal - consumed)}</Text>
-              </Ring>
-              <View style={{ flex: 1 }}>
-                <Text style={s.dietT}>今日饮食</Text>
-                <Sub>
-                  {`已摄入 ${Math.round(consumed)} / 目标 ${nut.kcal} kcal${consumed > nut.kcal ? ' · 已超标' : ''}`}
-                </Sub>
+            {weekPrList.length > 0 ? (
+              <View style={s.prRow}>
+                <Text style={s.prT}>🏆</Text>
+                <Text style={s.prText}>
+                  {`本周新纪录：${weekPrList.slice(0, 2).map((p) => `${p.name} ${p.prev}→${p.cur}kg`).join('、')}${weekPrList.length > 2 ? ` 等 ${weekPrList.length} 项` : ''}`}
+                </Text>
               </View>
-              <Text style={s.arrow}>›</Text>
-            </Card>
-          </Press>
+            ) : null}
+            {ai.enabled && ai.apiKey ? (
+              <View style={s.aiBox}>
+                <Button
+                  title="🤖 AI 复盘"
+                  kind="ghost"
+                  small
+                  loading={aiLoading}
+                  disabled={aiLoading}
+                  onPress={() => { void runAiReview(); }}
+                />
+              </View>
+            ) : null}
+            {aiReview ? (
+              <View style={s.aiReviewBox}>
+                <Text style={s.aiReviewT}>{aiReview}</Text>
+              </View>
+            ) : null}
+          </Card>
         </Animated.View>
       </Scroll>
 
@@ -508,7 +600,22 @@ export default function TodayScreen() {
         <Pressable style={s.posterBackdrop} onPress={() => setPosterOpen(false)}>
           <Pressable onPress={(e) => e.stopPropagation()} style={s.posterModal}>
             <View ref={posterRef} collapsable={false} style={s.posterShotWrap}>
-              <SharePoster data={{ weekDone, weekPlanned, volumeKg: thisVol, dietDays, weightDelta: wDelta, streak }} />
+              <SharePoster
+                data={{
+                  weekDone,
+                  weekPlanned,
+                  volumeKg: thisVol,
+                  dietDays,
+                  weightDelta: wDelta,
+                  streak,
+                  photos: weekPhotos,
+                  prText: weekPrList.length
+                    ? `${weekPrList[0].name} 估算1RM ${weekPrList[0].prev}→${weekPrList[0].cur}kg${weekPrList.length > 1 ? ` 等 ${weekPrList.length} 项` : ''}`
+                    : undefined,
+                  seasonEmojis: season.emojis,
+                  seasonQuote: season.quote,
+                }}
+              />
             </View>
             <View style={s.posterBtnRow}>
               <Button title="分享图片" onPress={() => { void doSharePoster(); }} />
@@ -586,6 +693,14 @@ const s = StyleSheet.create({
   wTrendBtn: { color: C.accent, fontSize: 13, fontWeight: '700' },
   weekReview: { paddingVertical: 14 },
   shareT: { color: C.accent, fontSize: 13, fontWeight: '700' },
+  prRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginTop: 10 },
+  prT: { color: C.text, fontSize: 15 },
+  prText: { color: C.markerInk, fontSize: 12, fontWeight: '700', flex: 1, fontFamily: FONT.semi },
+  aiBox: { marginTop: 12, alignSelf: 'flex-start' },
+  aiReviewBox: {
+    marginTop: 10, backgroundColor: C.inset, borderRadius: 10, borderWidth: 1.5, borderColor: C.inkAlphaSoft, padding: 12,
+  },
+  aiReviewT: { color: C.text, fontSize: 13, lineHeight: 19, fontWeight: '600' },
   posterBackdrop: { flex: 1, backgroundColor: 'rgba(43,36,22,0.55)', alignItems: 'center', justifyContent: 'center', padding: 24 },
   posterModal: { alignItems: 'center' },
   posterShotWrap: { borderRadius: R.lg },
