@@ -127,7 +127,7 @@ export type JournalKind = 'workout' | 'meal' | 'free';
 
 export interface JournalSticker {
   id: string;
-  uri: string;        // data URI（base64）或本地文件 URI
+  uri: string;        // 本机文件路径（真机）或 data URI（Web 预览），见 lib/photoFile.ts
   x: number;          // 画布归一化坐标 0..1
   y: number;
   rot: number;        // 角度
@@ -146,7 +146,7 @@ export interface DoodlePath {
 
 export interface JournalPhoto {
   id: string;
-  uri: string;        // data URI（base64）或本地文件 URI
+  uri: string;        // 本机文件路径（真机）或 data URI（Web 预览），见 lib/photoFile.ts
   name: string;       // AI 识别的名称（如「鸭腿饭」）
   /** nosh 风贴纸：主体抠图 + 白描边后的透明 PNG（照片墙直接展示它，失败则回退整张照片） */
   cutoutUri?: string;

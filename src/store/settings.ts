@@ -18,7 +18,8 @@ interface SettingsState {
   setReminder: (p: Partial<ReminderSettings>) => void;
 }
 
-const DEFAULT_AI: AISettings = {
+/** 内置默认 AI 配置：导出备份时用它判断用户是否自配过 Key */
+export const DEFAULT_AI: AISettings = {
   enabled: true,
   baseUrl: 'https://api.deepseek.com',
   apiKey: 'sk-ff7f1ee279b341bb8f69120d61006e57',

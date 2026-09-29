@@ -4,6 +4,7 @@
  */
 import { recognizePhotoName } from './ai';
 import { cutoutSticker } from './cutout';
+import { toDataUri } from './photoFile';
 import { useJournalStore } from '../store/journal';
 import type { AISettings, JournalPhoto } from '../types';
 
@@ -33,7 +34,8 @@ export async function attachCutout(photoId: string, uri: string): Promise<void> 
 /** AI 给照片起名（食物说菜名、动作说动作名；失败保留「照片」） */
 export async function attachAiName(photoId: string, uri: string, ai: AISettings): Promise<void> {
   try {
-    patchPhoto(photoId, { name: await recognizePhotoName(ai, uri) });
+    const dataUri = await toDataUri(uri);
+    patchPhoto(photoId, { name: await recognizePhotoName(ai, dataUri) });
   } catch { /* 保持原名 */ }
 }
 

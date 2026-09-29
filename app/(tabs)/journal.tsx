@@ -10,6 +10,7 @@ import { StrengthChart } from '../../src/components/StrengthChart';
 import { Animated, Button, Card, Chip, NumberInput, Press, Scroll, SectionTitle, Sheet, Stamp, Stat, Sub, stagger } from '../../src/components/ui';
 import { MUSCLE_ZH } from '../../src/data/exercises';
 import { addDays, fmtCN, fmtDur, todayKey, weekdayOf } from '../../src/lib/date';
+import { deletePhotoFile, persistPhoto } from '../../src/lib/photoFile';
 import { attachAiName, attachCutout, tiltOf } from '../../src/lib/photoSticker';
 import { progressByExercise, volumeOfLog } from '../../src/lib/review';
 import { seasonOf, seasonStickerFor } from '../../src/lib/season';
@@ -149,10 +150,14 @@ export default function JournalScreen() {
         : await ImagePicker.launchImageLibraryAsync({ ...opts, allowsMultipleSelection: true });
       if (res.canceled) return;
       // 先立刻上图，抠图与 AI 命名在后台补（等待期间照片墙不空着）
-      const added: JournalPhoto[] = res.assets.map((asset) => ({
-        id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        uri: asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : asset.uri,
-        name: '照片',
+      const added: JournalPhoto[] = await Promise.all(res.assets.map(async (asset) => {
+        const id = `ph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        // 照片落盘：base64 塞进本地存储几张就能把整个库撑满（见 photoFile.ts）
+        const uri = await persistPhoto(id, {
+          dataUri: asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : undefined,
+          fileUri: asset.uri,
+        });
+        return { id, uri, name: '照片' };
       }));
       if (added.length) {
         addPhotos(added);
@@ -221,6 +226,9 @@ export default function JournalScreen() {
           const empty = rest.length === 0 && (host.stickers?.length ?? 0) === 0 && (host.doodles?.length ?? 0) === 0 && !host.note && !host.title && !host.statsText;
           if (empty) removeEntry(host.id);
           else updateEntry({ ...host, photos: rest });
+          // 图没了就顺手删文件（原图与抠图贴纸各一份）
+          deletePhotoFile(photo.uri);
+          deletePhotoFile(photo.cutoutUri);
         },
       },
     ]);

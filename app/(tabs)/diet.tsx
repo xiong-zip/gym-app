@@ -8,6 +8,7 @@ import { FOOD_CATS, FOODS } from '../../src/data/foods';
 import { recognizeMeal, type MealItem, type MealRecognition } from '../../src/lib/ai';
 import { addDays, fmtCN, todayKey, weekdayOf } from '../../src/lib/date';
 import { calcNutrition } from '../../src/lib/nutrition';
+import { persistPhoto } from '../../src/lib/photoFile';
 import { attachCutout } from '../../src/lib/photoSticker';
 import { frequentCombos, suggestMeal, type MealCombo } from '../../src/lib/suggest';
 import { useDietStore } from '../../src/store/diet';
@@ -310,11 +311,13 @@ export default function DietScreen() {
     resetSnap();
   };
 
-  const snapToPlog = () => {
+  const snapToPlog = async () => {
     if (!snapUri) return;
     // 直接贴进手帐照片墙（名称用 AI 识别结果），后台再抠成白边贴纸
     const name = snapItemsScaled.map((i) => i.name).join('·').slice(0, 8) || '这一餐';
-    const photo = { id: `ph-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, uri: snapUri, name };
+    const id = `ph-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    // 识别用的是 data URI，存进手帐的照片先落盘（见 photoFile.ts）
+    const photo = { id, uri: await persistPhoto(id, { dataUri: snapUri }), name };
     const host = journalEntries.find((e) => e.date === date && (e.photos?.length ?? 0) > 0 && (e.stickers?.length ?? 0) === 0 && !e.note && !e.title && !e.statsText);
     if (host) updateJournalEntry({ ...host, photos: [...(host.photos ?? []), photo] });
     else addJournalEntry({
@@ -514,7 +517,7 @@ export default function DietScreen() {
                 </View>
                 <View style={s.snapBtnRow}>
                   <Button title={`加入${snapMealLabel}`} small onPress={addSnapToDiet} />
-                  <Button title="贴进手帐" kind="ghost" small onPress={snapToPlog} />
+                  <Button title="贴进手帐" kind="ghost" small onPress={() => { void snapToPlog(); }} />
                   <Press hitSlop={8} onPress={resetSnap}>
                     <Text style={s.snapReset}>✕</Text>
                   </Press>

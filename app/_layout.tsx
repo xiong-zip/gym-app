@@ -14,6 +14,7 @@ import { useSessionDraftStore } from '../src/store/sessionDraft';
 import { useSettingsStore } from '../src/store/settings';
 import { useWorkoutsStore } from '../src/store/workouts';
 import { rescheduleTrainingReminders, setupNotifications } from '../src/lib/notify';
+import { collectPhotoGarbage, migratePhotosToFiles } from '../src/lib/photoFile';
 import '../src/lib/alertPolyfill';
 import '../src/lib/noScrollbar';
 import { C, FONT } from '../src/theme';
@@ -50,6 +51,19 @@ export default function RootLayout() {
     void setupNotifications();
     void rescheduleTrainingReminders(profile, reminder);
   }, [ready, profile, reminder]);
+
+  // 手帐照片：老数据里的 base64 搬进文件目录（一次性），顺手清掉没人引用的图
+  useEffect(() => {
+    if (!ready) return;
+    void (async () => {
+      try {
+        await migratePhotosToFiles();
+        collectPhotoGarbage();
+      } catch {
+        // 迁移失败不影响使用，下次启动再试
+      }
+    })();
+  }, [ready]);
 
   if (!ready || !fontsLoaded) {
     return (

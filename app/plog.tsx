@@ -8,6 +8,7 @@ import * as ImagePicker from 'expo-image-picker';
 import Svg, { Polyline } from 'react-native-svg';
 import { Button, DotsBg, Press, Scroll, Sub, Tape, haptic } from '../src/components/ui';
 import { cutoutSticker } from '../src/lib/cutout';
+import { deletePhotoFile, persistPhoto } from '../src/lib/photoFile';
 import { takePendingPhoto } from '../src/lib/pendingPhoto';
 import { todayKey } from '../src/lib/date';
 import { useJournalStore } from '../src/store/journal';
@@ -113,15 +114,22 @@ export default function PlogScreen() {
     haptic('light');
     setCutting(true);
     try {
-      const res = await cutoutSticker(uri);
+      // 先落盘再抠图：本地存储塞不下 base64 照片（见 photoFile.ts）
+      const id = `sk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const fileUri = await persistPhoto(id, {
+        dataUri: uri.startsWith('data:') ? uri : undefined,
+        fileUri: uri.startsWith('data:') ? undefined : uri,
+      });
+      const res = await cutoutSticker(fileUri);
       if (res) {
         addSticker(res.uri, { cutout: true, iw: res.width, ih: res.height });
+        deletePhotoFile(fileUri); // 抠图成功后原图不再需要
         return;
       }
+      addSticker(fileUri);
     } finally {
       setCutting(false);
     }
-    addSticker(uri);
   };
 
   const pickPhoto = async (fromCamera: boolean) => {

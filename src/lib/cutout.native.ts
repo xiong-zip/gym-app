@@ -11,6 +11,7 @@ import * as ort from 'onnxruntime-react-native';
 import jpeg from 'jpeg-js';
 import { deflate } from 'pako';
 import { renderSticker, STICKER_INPUT, STICKER_MAX_SIDE, upscaleMask } from './sticker';
+import { STICKER_DIR } from './photoFile';
 import type { CutoutResult } from './cutout.types';
 
 export type { CutoutResult };
@@ -192,7 +193,7 @@ export async function cutoutSticker(src: string): Promise<CutoutResult | null> {
 
     // 6. 编码 PNG 存文件
     const png = encodePNG(sticker.width, sticker.height, sticker.data);
-    const dir = new Directory(Paths.document, 'stickers');
+    const dir = new Directory(Paths.document, STICKER_DIR);
     if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
     const file = new File(dir, `st-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.png`);
     file.write(png);

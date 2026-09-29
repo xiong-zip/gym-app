@@ -1,11 +1,13 @@
 import { useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Platform, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Animated, Button, Card, Chip, Press, Scroll, SectionTitle, Sub, TextInputLine, stagger } from '../../src/components/ui';
 import { chat } from '../../src/lib/ai';
+import { backupInfo, exportBackup, importBackup, type BackupInfo } from '../../src/lib/backup';
 import { requestNotificationPermission, rescheduleTrainingReminders } from '../../src/lib/notify';
 import { ACTIVITY_ZH, bmi, calcNutrition, GENDER_ZH, GOAL_ZH } from '../../src/lib/nutrition';
+import { collectPhotoGarbage } from '../../src/lib/photoFile';
 import { EQUIP_ACCESS_TEXT } from '../../src/lib/planner';
 import { useDietStore } from '../../src/store/diet';
 import { useJournalStore } from '../../src/store/journal';
@@ -32,6 +34,11 @@ const TIME_PRESETS: [string, number, number][] = [
   ['7:00', 7, 0], ['12:00', 12, 0], ['18:00', 18, 0], ['19:00', 19, 0], ['20:00', 20, 0], ['21:00', 21, 0],
 ];
 
+/** KB → 人看得懂的体积 */
+function fmtKB(kb: number): string {
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(kb))} KB`;
+}
+
 export default function ProfileScreen() {
   const router = useRouter();
   const profile = useProfileStore((s) => s.profile);
@@ -48,6 +55,13 @@ export default function ProfileScreen() {
 
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backup, setBackup] = useState<BackupInfo | null>(null);
+
+  useEffect(() => {
+    void backupInfo().then(setBackup).catch(() => setBackup(null));
+  }, []);
 
   const sound = useSettingsStore((s) => s.sound);
   const setSound = useSettingsStore((s) => s.setSound);
@@ -135,6 +149,61 @@ export default function ProfileScreen() {
     } finally {
       setTesting(false);
     }
+  };
+
+  /* ---------- 数据备份：导出成一个文件发给自己，换手机时导入 ---------- */
+
+  const runExport = async () => {
+    setBackupBusy(true);
+    try {
+      const r = await exportBackup();
+      if (r.ok) {
+        Alert.alert('备份已导出', `含 ${r.photos ?? 0} 张照片，约 ${fmtKB(r.dataKB ?? 0)}。\n\n把文件存到网盘或发给「文件传输助手」，换手机后在新手机上导入即可。`);
+      } else {
+        Alert.alert('导出失败', r.reason ?? '请重试');
+      }
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const doExport = () => {
+    const size = backup ? `\n\n本机现有 ${backup.photos} 张手帐照片，数据合计约 ${fmtKB(backup.dataKB + Math.round(backup.photoBytes / 1024))}。` : '';
+    Alert.alert(
+      '导出备份？',
+      `训练、饮食、体重、手帐、照片与设置会打包成一个文件，然后调起系统分享面板。${size}\n\n备份不含 AI Key。`,
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '导出', onPress: () => { void runExport(); } },
+      ],
+    );
+  };
+
+  const runImport = async () => {
+    setBackupBusy(true);
+    try {
+      const r = await importBackup();
+      if (r.ok) {
+        collectPhotoGarbage();
+        void backupInfo().then(setBackup).catch(() => setBackup(null));
+        Alert.alert('导入完成', `已恢复全部记录与 ${r.photos ?? 0} 张照片。\n\n手帐照片与训练记录都回来了，可以直接翻看。`);
+      } else if (!r.canceled) {
+        Alert.alert('导入失败', r.error ?? '请确认选的是本 App 导出的备份文件');
+      }
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const doImport = () => {
+    Alert.alert(
+      '导入备份？',
+      '会覆盖这台手机上同名的数据：训练记录、饮食、体重、手帐与照片、设置。\n\n当前数据不可恢复，确定继续吗？',
+      [
+        { text: '取消', style: 'cancel' },
+        { text: '选择备份文件', style: 'destructive', onPress: () => { void runImport(); } },
+      ],
+    );
   };
 
   return (
@@ -306,16 +375,32 @@ export default function ProfileScreen() {
 
         <Animated.View entering={stagger(4)}>
           <Card style={{ marginTop: 14 }}>
-            <SectionTitle>数据管理</SectionTitle>
-            <Button title="清空所有数据" kind="danger" small onPress={clearAll} />
+            <SectionTitle>数据备份</SectionTitle>
+            <Sub>
+              {backup
+                ? `本机：${backup.photos} 张手帐照片（${fmtKB(Math.round(backup.photoBytes / 1024))}）+ 记录约 ${fmtKB(backup.dataKB)}`
+                : '正在统计本机数据…'}
+              {'\n'}数据只存在这台手机上，换机会丢。导出成文件发给自己，新手机上导入就能全部带过去。
+            </Sub>
+            <View style={s.backupRow}>
+              <Button title="导出备份" small loading={backupBusy} onPress={doExport} />
+              <Button title="导入备份" kind="ghost" small disabled={backupBusy} onPress={doImport} />
+            </View>
           </Card>
         </Animated.View>
 
         <Animated.View entering={stagger(5)}>
           <Card style={{ marginTop: 14 }}>
+            <SectionTitle>数据管理</SectionTitle>
+            <Button title="清空所有数据" kind="danger" small onPress={clearAll} />
+          </Card>
+        </Animated.View>
+
+        <Animated.View entering={stagger(6)}>
+          <Card style={{ marginTop: 14 }}>
             <SectionTitle>关于</SectionTitle>
             <Sub>
-              健身搭子 v1.7.0{'\n'}
+              健身搭子 v1.8.0{'\n'}
               本应用提供的训练与饮食建议仅供健康人群参考，不构成医疗建议。如有伤病、孕期或慢性疾病，请先咨询医生。食物营养数据为近似值。
             </Sub>
           </Card>
@@ -341,6 +426,7 @@ const s = StyleSheet.create({
   switchRow: { flexDirection: 'row', alignItems: 'center' },
   rowTitleT: { color: C.text, fontSize: 14, fontWeight: '700', marginBottom: 3 },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  backupRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
   presetChip: {
     borderRadius: 999, borderWidth: 1.5, borderColor: C.inkAlpha, backgroundColor: C.card,
     paddingHorizontal: 14, paddingVertical: 8,
